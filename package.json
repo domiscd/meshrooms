@@ -15,7 +15,7 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "test": "bun test ./server ./scripts",
-    "test:source": "bun test ./server/node.test.ts ./server/http.test.ts ./server/instance.test.ts ./server/runtime.test.ts ./server/windows-path.test.ts ./scripts",
+    "test:source": "bun test ./server/node.test.ts ./server/http.test.ts ./server/instance.test.ts ./server/runtime.test.ts ./server/windows-path.test.ts ./server/peer-bridge.test.ts ./server/meshguard.test.ts ./scripts",
     "meshrooms": "bun run server/cli.ts",
     "package:runtime": "bun run scripts/package-runtime.ts",
     "daemon": "bun run server/daemon.ts",

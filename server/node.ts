@@ -4,7 +4,8 @@ import type { Draft, NodeSnapshot, Participant } from '../src/room';
 import type { SetupCommand, PendingRoom } from '../src/setup';
 import type { DurableStore } from './persistence/store';
 import { CATALOG, CATALOG_V1, MAX_ROOMS, MAX_MESSAGES, MAX_HISTORY_BYTES, fingerprint, historyKey, isHash, isUuid,
-  migrateV1, recover, tokenHash, validCatalog, validHistory, type Catalog, type History, type Principal, type RoomRecord, type StoredMessage } from './model';
+  migrateV1, migrateV2, recover, tokenHash, validCatalog, validHistory, type Catalog, type History, type Principal, type RoomRecord, type StoredMessage } from './model';
+import { parseDescriptor, type RoomDescriptor } from './peer-model';
 export type { Principal } from './model';
 
 export class NodeError extends Error { constructor(public status: number, message: string) { super(message); } }
@@ -30,7 +31,13 @@ export class LocalNode {
   constructor(private readonly store: DurableStore) {
     const raw = store.read(CATALOG);
     let writeCatalog = false;
-    if (raw !== null) this.catalog = recover<Catalog>(raw, 'node catalog', validCatalog);
+    if (raw !== null) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed.version === 2) { this.catalog = migrateV2(parsed); writeCatalog = true; }
+        else this.catalog = recover<Catalog>(raw, 'node catalog', validCatalog);
+      } catch { throw new Error('Cannot recover node catalog: invalid stored data. The store has not been reset.'); }
+    }
     else {
       const legacy = store.read(CATALOG_V1);
       if (legacy !== null) {
@@ -38,7 +45,7 @@ export class LocalNode {
         catch { throw new Error('Cannot recover node catalog: invalid stored data. The store has not been reset.'); }
       } else {
         const owner: Participant = { id: randomUUID(), name: 'You', role: 'human', state: 'local', detail: 'Local participant · room member' };
-        this.catalog = { version: 2, nodeId: randomUUID(), ownerId: owner.id, participants: [owner], rooms: [],
+        this.catalog = { version: 3, nodeId: randomUUID(), ownerId: owner.id, participants: [owner], rooms: [],
           settings: { completed: false, machineName: hostname().slice(0, 64) || 'This machine', startAtLogin: false }, intents: [], setupReceipts: [] };
       }
       writeCatalog = true;
@@ -48,6 +55,13 @@ export class LocalNode {
       const history = store.read(historyKey(room.id));
       if (history === null || Buffer.byteLength(history) > MAX_HISTORY_BYTES) throw new Error(`Cannot recover room ${room.id}: history is missing or too large. The store has not been reset.`);
       this.histories.set(room.id, recover<History>(history, `room ${room.id}`, value => validHistory(value, room, this.catalog.participants)));
+      if (room.peer) {
+        const messages = this.histories.get(room.id)!.messages;
+        if ([...room.peer.excluded, ...room.peer.acknowledged].some(id => !messages.some(m => m.id === id))
+          || room.peer.acknowledged.some(id => room.peer!.excluded.includes(id) || this.person(messages.find(m => m.id === id)!.authorId).state !== 'local')) {
+          throw new Error('Cannot recover delivery receipts: invalid stored data. The store has not been reset.');
+        }
+      }
     }
     if (writeCatalog) store.write(CATALOG, JSON.stringify(this.catalog));
     this.timer = setInterval(() => {
@@ -65,10 +79,10 @@ export class LocalNode {
   snapshot(principal: Principal = this.owner): NodeSnapshot {
     const rooms = this.catalog.rooms.filter(room => this.permitted(principal, room));
     return { backend: 'local', storage: 'wormdb', nodeId: this.catalog.nodeId, localParticipantId: principal.participantId,
-      rooms: rooms.map(({ id, title, project, sample, participantIds }) => ({ id, title, project, sample,
+      rooms: rooms.map(({ id, title, project, sample, participantIds, peer }) => ({ id, title, project, sample, ...(peer ? { paired: true } : {}),
         participants: participantIds.map(id => {
           const person = this.person(id);
-          if (person.role !== 'agent') return { ...person };
+          if (person.state === 'remote' || person.role !== 'agent') return { ...person };
           const connected = (this.connections.get(id) || 0) > 0 || (this.leases.get(id) || 0) > Date.now();
           return { ...person, connected, detail: connected ? 'Agent connected on this machine' : 'Awaiting agent connection' };
         }),
@@ -171,6 +185,7 @@ export class LocalNode {
     if (!body && !share) throw new NodeError(400, 'Enter a message or a labeled excerpt.');
     const history = this.histories.get(room.id)!;
     if (input.replyTo !== undefined && (typeof input.replyTo !== 'string' || !history.messages.some(message => message.id === input.replyTo))) throw new NodeError(400, 'The reply target is not in this room. Choose a message from this room.');
+    if (typeof input.replyTo === 'string' && room.peer?.excluded.includes(input.replyTo)) throw new NodeError(400, 'That message predates pairing and is private to this node. Send a new message instead.');
     const replyTo = input.replyTo as string | undefined; const hash = fingerprint({ text: body, share, replyTo });
     const existing = history.messages.find(m => m.requestId === id && m.authorId === principal.participantId);
     if (existing) { this.assertRetry(existing.fingerprint, hash); return { messageId: existing.id, status: 'stored-locally' }; }
@@ -183,6 +198,64 @@ export class LocalNode {
     this.persist(historyKey(room.id), next); this.histories.set(room.id, next); this.touch(principal); this.notify(); return { messageId: message.id, status: 'stored-locally' };
   }
   requireOwner(principal: Principal) { if (principal.kind !== 'owner' || principal.participantId !== this.catalog.ownerId) throw new NodeError(403, 'This action requires the local human session.'); }
+  descriptor(roomId: unknown, peerKey: string): RoomDescriptor {
+    const room = this.requireRoom(roomId, this.owner);
+    return { version: 1, roomId: room.id, peerKey, participants: room.participantIds.map(id => this.person(id))
+      .filter(p => p.state === 'local').map(({ id, name, role }) => ({ id, name, role })) };
+  }
+  pairRoom(input: unknown, localKey: string) {
+    this.assertReady();
+    let descriptor: RoomDescriptor;
+    try { descriptor = parseDescriptor(input); } catch { throw new NodeError(400, 'Invalid room pairing descriptor.'); }
+    const room = this.requireRoom(descriptor.roomId, this.owner);
+    if (descriptor.peerKey === localKey) throw new NodeError(400, 'Select another machine identity.');
+    if (room.peer) {
+      const prior = { version: 1, roomId: room.id, peerKey: room.peer.key, participants: room.peer.participantIds.map(id => {
+        const { id: participantId, name, role } = this.person(id); return { id: participantId, name, role };
+      }) };
+      if (fingerprint(prior) !== fingerprint(descriptor)) throw new NodeError(409, 'This room is already paired. Changing membership requires a separate admission flow.');
+      return { roomId: room.id };
+    }
+    const next = structuredClone(this.catalog), target = next.rooms.find(r => r.id === room.id)!;
+    for (const person of descriptor.participants) {
+      const prior = next.participants.find(p => p.id === person.id);
+      if (prior && (prior.state !== 'remote' || prior.peerKey !== descriptor.peerKey || prior.name !== person.name || prior.role !== person.role)) throw new NodeError(409, 'A participant identity conflicts with this node.');
+      if (!prior) next.participants.push({ ...person, state: 'remote', peerKey: descriptor.peerKey, detail: 'Remote room member · presence not tracked' });
+    }
+    target.peer = { key: descriptor.peerKey, participantIds: descriptor.participants.map(p => p.id),
+      excluded: this.histories.get(room.id)!.messages.map(m => m.id), acknowledged: [] };
+    target.participantIds.push(...target.peer.participantIds);
+    if (!validCatalog(next)) throw new NodeError(409, 'The pairing conflicts with existing room identities.');
+    this.saveCatalog(next); return { roomId: room.id };
+  }
+  acceptsPeer(roomId: string, key: string) { return this.catalog.rooms.some(r => r.id === roomId && r.peer?.key === key); }
+  pendingDelivery() {
+    return this.catalog.rooms.filter(r => r.peer).map(room => ({ roomId: room.id, peerKey: room.peer!.key,
+      messages: structuredClone(this.histories.get(room.id)!.messages.filter(m => this.person(m.authorId).state === 'local'
+        && !room.peer!.excluded.includes(m.id) && !room.peer!.acknowledged.includes(m.id))), acknowledged: [...room.peer!.acknowledged] }));
+  }
+  acknowledgePeer(roomId: string, key: string, messageId: string, hash: string) {
+    this.assertReady();
+    const room = this.catalog.rooms.find(r => r.id === roomId && r.peer?.key === key);
+    const message = room && this.histories.get(roomId)!.messages.find(m => m.id === messageId && this.person(m.authorId).state === 'local');
+    if (!room?.peer || !message || fingerprint(message) !== hash || room.peer.excluded.includes(messageId)) throw new NodeError(403, 'Unknown delivery receipt.');
+    if (room.peer.acknowledged.includes(messageId)) return;
+    const next = structuredClone(this.catalog); next.rooms.find(r => r.id === roomId)!.peer!.acknowledged.push(messageId); this.saveCatalog(next);
+  }
+  receivePeer(roomId: string, key: string, input: any) {
+    this.assertReady();
+    const room = this.catalog.rooms.find(r => r.id === roomId && r.peer?.key === key);
+    if (!room?.peer || !room.peer.participantIds.includes(input?.authorId)) throw new NodeError(403, 'Peer is not admitted as this room author.');
+    const message: StoredMessage = { id: input.id, authorId: input.authorId, author: input.author, role: input.role,
+      text: input.text, time: input.time, share: input.share, replyTo: input.replyTo, requestId: input.requestId, fingerprint: input.fingerprint };
+    const history = this.histories.get(roomId)!;
+    const existing = history.messages.find(m => m.id === message.id || (m.authorId === message.authorId && m.requestId === message.requestId));
+    if (existing) { this.assertRetry(fingerprint(existing), fingerprint(message)); return fingerprint(existing); }
+    const next: History = { ...history, version: 2, messages: [...history.messages, message] };
+    if (message.author !== this.person(message.authorId).name || message.fingerprint !== fingerprint({ text: message.text, share: message.share, replyTo: message.replyTo })
+      || !validHistory(next, room, this.catalog.participants) || Buffer.byteLength(JSON.stringify(next)) > MAX_HISTORY_BYTES) throw new NodeError(400, 'Invalid remote room message.');
+    this.persist(historyKey(roomId), next); this.histories.set(roomId, next); this.notify(); return fingerprint(message);
+  }
   private permitted(principal: Principal, room: RoomRecord) { return room.participantIds.includes(principal.participantId) && (principal.kind === 'owner' || principal.roomId === room.id); }
   private person(id: string) { const person = this.catalog.participants.find(p => p.id === id); if (!person) throw new NodeError(403, 'Unknown participant.'); return person; }
   private requireRoom(id: unknown, principal: Principal): RoomRecord {

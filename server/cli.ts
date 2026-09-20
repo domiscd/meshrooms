@@ -14,7 +14,7 @@ function parse(args: string[]) {
     if (!key.startsWith('--') || value === undefined || Object.hasOwn(values, key)) throw new Error(`Use one value for ${key}.`);
     values[key] = value;
   }
-  const allowed = ['--data-dir', '--library', '--port', '--dev-origin', '--title', '--project', '--agent', '--request-id', '--credential', '--text', '--after', '--wait-seconds'];
+  const allowed = ['--data-dir', '--library', '--port', '--dev-origin', '--title', '--project', '--agent', '--request-id', '--credential', '--text', '--after', '--wait-seconds', '--room', '--descriptor'];
   for (const key of Object.keys(values)) if (!allowed.includes(key)) throw new Error(`Unknown option ${key}.`);
   return { command, values };
 }
@@ -81,9 +81,10 @@ async function listen(record: RuntimeRecord, credential: ClientCredential, after
 export async function runCli(args: string[]): Promise<unknown> {
   const { command, values } = parse(args);
   if (command === 'help') return { commands: ['status', 'ensure', 'open', 'start --title NAME --agent NAME [--project LABEL]',
-    'read --credential PATH', 'send --credential PATH --request-id UUID --text TEXT', 'listen --credential PATH [--after MESSAGE_ID] [--wait-seconds 30]'],
+    'read --credential PATH', 'send --credential PATH --request-id UUID --text TEXT', 'listen --credential PATH [--after MESSAGE_ID] [--wait-seconds 30]',
+    'transport', 'descriptor --room UUID', 'pair --descriptor PATH (operator-approved two-node development pairing)'],
     options: ['--data-dir PATH', '--library PATH', '--port NUMBER', '--dev-origin URL'], note: 'Browser links expire after two minutes. Agent credential files stay private on this machine.' };
-  if (!['status', 'ensure', 'open', 'start', 'read', 'send', 'listen'].includes(command)) throw new Error(`Unknown command ${command}. Run help.`);
+  if (!['status', 'ensure', 'open', 'start', 'read', 'send', 'listen', 'transport', 'descriptor', 'pair'].includes(command)) throw new Error(`Unknown command ${command}. Run help.`);
   if (['read', 'send', 'listen'].includes(command)) {
     const credential = readCredential(resolve(requireText(values['--credential'], '--credential', 4096)));
     const runtime = await probeRuntime(credential.dataDir);
@@ -101,6 +102,19 @@ export async function runCli(args: string[]): Promise<unknown> {
   if (values['--dev-origin']) options.devOrigin = values['--dev-origin'];
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) throw new Error('Use a valid port.');
   if (command === 'status') return { state: 'status', runtime: await probeRuntime(options.dataDir) };
+  if (['transport', 'descriptor', 'pair'].includes(command)) {
+    const runtime = await probeRuntime(options.dataDir);
+    if (!runtime) throw new Error('Start the intended local node before inspecting or pairing it.');
+    const token = await ownerToken(options.dataDir, runtime);
+    if (command === 'transport') return api(runtime, token, 'transport');
+    if (command === 'descriptor') {
+      if (!isUuid(values['--room'])) throw new Error('Use --room with the accepted room UUID.');
+      return api(runtime, token, `rooms/descriptor?roomId=${values['--room']}`);
+    }
+    const file = resolve(requireText(values['--descriptor'], '--descriptor', 4096));
+    const descriptor = JSON.parse(readFileSync(file, 'utf8'));
+    return api(runtime, token, 'rooms/pair', descriptor);
+  }
   // Validate intent fields before starting a process or preparing private files.
   const title = command === 'start' ? requireText(values['--title'], '--title', 64) : '';
   const agentName = command === 'start' ? requireText(values['--agent'], '--agent', 64) : '';

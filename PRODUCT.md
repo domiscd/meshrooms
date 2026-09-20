@@ -38,6 +38,8 @@ Meshrooms is provisional. Concise operational copy; no marketing claims, dashboa
 
 The architecture decision records the separate application and one-daemon model. Local recovery and browser evidence is tracked in NOTES.md. Native library provenance and durability limits are in docs/wormdb-adapter.md. MeshGuard transport qualification proceeds independently; this UI is not yet connected to it. Synthetic content appears only in explicit demo mode.
 
+An experimental source-only [two-node delivery path](docs/peer-delivery.md) adds explicit development pairing and durable room-message retry over MeshGuard application channels. It uses isolated qualification stores with labeled QA owners; it does not implement public invitations, normal remote onboarding, or automatic harness wakeups. Release alpha.2 remains the earlier local-only runtime.
+
 ## Product Principles
 
 - Sharing is explicit and reviewable.
@@ -51,3 +53,5 @@ The architecture decision records the separate application and one-daemon model.
 ## Open Decisions
 
 Name, remote invitation authority, agent wakeup adapters, transport authentication, scalable append history, and remote outbox/recovery remain open. Layout A, the one-daemon/many-rooms model, local agent credentials, and local WormDB persistence are implemented; see `docs/architecture/0001-one-daemon-many-rooms.md` and `docs/local-daemon.md`.
+
+Agents should be able to watch an admitted room and handle directed messages without repeated human prompts. The planned first proof is a Windows Codex / Linux Grok room with automatic wakeup, replies, and restart recovery; see [agent room watching](docs/flows/agent-room-watching.md). This is a future capability, not a property of the current bounded CLI listener.

@@ -10,8 +10,11 @@ import { randomUUID } from 'node:crypto';
 import { NodeAccess } from './access';
 import { loadControlToken, registerRuntime, runtimeProof, type RuntimeRecord } from './runtime';
 import { startupManager, type StartupManager } from './startup';
+import { MeshGuardTransport } from './meshguard';
+import { PeerBridge } from './peer-bridge';
 
-export type DaemonOptions = { dataDir: string; libraryPath: string; port: number; distDir: string; devOrigin?: string; startup?: StartupManager };
+export type DaemonOptions = { dataDir: string; libraryPath: string; port: number; distDir: string; devOrigin?: string; startup?: StartupManager;
+  meshguard?: { socketPath: string; publicKey: string } };
 
 export function defaultOptions(): DaemonOptions {
   const root = resolve(import.meta.dir, '..');
@@ -25,6 +28,9 @@ export function defaultOptions(): DaemonOptions {
     dataDir: resolve(process.env.MESHROOMS_DATA_DIR || (process.platform === 'win32' ? join(homedir(), '.meshrooms', 'data') : join(dataRoot, 'Meshrooms', 'data'))),
     libraryPath: resolve(process.env.WORMDB_LIBRARY_PATH || (existsSync(localLibrary) ? localLibrary : join(root, '..', 'wormdb', 'zig-out', ...binary))),
     port: Number(process.env.MESHROOMS_PORT || 4318), distDir: join(root, 'dist'),
+    ...(process.env.MESHROOMS_MESHGUARD_SOCKET || process.env.MESHROOMS_MESHGUARD_KEY ? { meshguard: {
+      socketPath: process.env.MESHROOMS_MESHGUARD_SOCKET || '', publicKey: process.env.MESHROOMS_MESHGUARD_KEY || '',
+    } } : {}),
   };
 }
 
@@ -40,6 +46,7 @@ export function startDaemon(options: DaemonOptions) {
   let unregister: (() => void) | undefined;
   let access: NodeAccess | undefined;
   let runtime: RuntimeRecord | undefined;
+  let bridge: PeerBridge | undefined;
   try {
     server = Bun.serve({
       hostname: '127.0.0.1', port: options.port, idleTimeout: 0, maxRequestBodySize: 32768,
@@ -47,6 +54,7 @@ export function startDaemon(options: DaemonOptions) {
     });
     store = openWormDBStore({ dataDir: realpathSync(options.dataDir), libraryPath: realpathSync(options.libraryPath) });
     node = new LocalNode(store!);
+    if (options.meshguard) bridge = new PeerBridge(node, new MeshGuardTransport(options.meshguard.socketPath, options.meshguard.publicKey));
     const control = loadControlToken(options.dataDir);
     access = new NodeAccess(control, node);
     runtime = { version: 1, apiVersion: 2, pid: process.pid, nodeId: node.nodeId, instanceId: randomUUID(), url: `http://127.0.0.1:${server.port}/prototype/room` };
@@ -54,11 +62,12 @@ export function startDaemon(options: DaemonOptions) {
     if (options.devOrigin) origins.push(options.devOrigin);
     const activeRuntime = runtime;
     handler = createHandler({ node, origins, distDir: options.distDir, dataDir: realpathSync(options.dataDir), access,
-      runtime, proof: challenge => runtimeProof(control, challenge, activeRuntime),
+      runtime, proof: challenge => runtimeProof(control, challenge, activeRuntime), bridge, localPeerKey: options.meshguard?.publicKey,
       startup: options.startup || startupManager({ ...options, port: server.port!, cliPath: join(import.meta.dir, 'cli.ts') }) });
     unregister = registerRuntime(options.dataDir, runtime);
+    bridge?.start();
   } catch (error) {
-    server?.stop(true);
+    bridge?.close(); server?.stop(true);
     try { node ? node.close() : store?.close(); } finally { unregister?.(); release(); }
     throw error;
   }
@@ -66,10 +75,10 @@ export function startDaemon(options: DaemonOptions) {
   const activeServer = server;
   let closed = false;
   return {
-    node: activeNode, server: activeServer, access: access!, runtime: runtime!,
+    node: activeNode, server: activeServer, access: access!, runtime: runtime!, bridge,
     close() {
       if (closed) return;
-      closed = true; activeServer.stop(true);
+      closed = true; bridge?.close(); activeServer.stop(true);
       try { activeNode.close(); } finally { unregister?.(); release(); }
     },
   };
