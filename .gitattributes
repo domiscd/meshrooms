@@ -8,3 +8,4 @@
 *.wal binary
 *.png binary
 *.woff2 binary
+deploy/nginx/* text eol=lf
