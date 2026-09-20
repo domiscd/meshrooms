@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { LocalNode } from './node';
 import { PeerBridge, packets } from './peer-bridge';
 import { CATALOG, fingerprint, tokenHash } from './model';
@@ -84,6 +84,8 @@ test('a failed receiving store never produces a remote receipt; retry recovers a
 
 test('pairing does not publish old history and rejects conflicting grants and message retries', () => {
   const db = database(), a = node(db), b = node(), room = randomUUID();
+  a.completeSetup({ requestId: randomUUID(), humanName: 'Local owner', machineName: 'Node A', startAtLogin: false });
+  b.completeSetup({ requestId: randomUUID(), humanName: 'Remote owner', machineName: 'Node B', startAtLogin: false });
   a.createRoom({ title: 'Room', requestId: room }); b.createRoom({ title: 'Room', requestId: room });
   const beforePairing = a.send({ roomId: room, requestId: randomUUID(), text: 'Before pairing' });
   const descriptor = b.descriptor(room, 'b'.repeat(64));
@@ -119,6 +121,18 @@ test('offline attachment keeps messages pending and malformed frames cannot crea
   await f.bridgeB.ingest({ sender: f.keyA, data: JSON.stringify({ ...packet, hash: 'f'.repeat(64) }) });
   expect(f.b.snapshot().rooms[0].messages).toHaveLength(0); expect(f.inboxA).toHaveLength(0);
   await f.bridgeA.pump(4000); await f.bridgeB.pump(4000); expect(f.b.snapshot().rooms[0].messages).toHaveLength(1);
+});
+
+test('canonical hash mismatches are rejected before persistence and receipt', async () => {
+  const f = fixture();
+  f.a.send({ roomId: f.room, requestId: randomUUID(), text: 'Canonical only' });
+  const message = f.a.pendingDelivery()[0].messages[0];
+  const forged = { ...message, wireOnly: 'ignored remotely' };
+  const data = Buffer.from(JSON.stringify(forged));
+  await f.bridgeB.ingest({ sender: f.keyA, data: JSON.stringify({ v: 1, k: 'chunk', room: f.room, id: message.id,
+    hash: createHash('sha256').update(data).digest('hex'), i: 0, n: 1, data: data.toString('base64') }) });
+  expect(f.b.snapshot().rooms[0].messages).toHaveLength(0);
+  expect(f.inboxA).toHaveLength(0);
 });
 
 test('v2 catalog migration preserves node identity; invalid stored room grants fail closed', () => {

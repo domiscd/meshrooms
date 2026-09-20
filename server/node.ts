@@ -208,6 +208,7 @@ export class LocalNode {
   }
   pairRoom(input: unknown, localKey: string) {
     this.assertReady();
+    if (!this.catalog.settings.completed) throw new NodeError(409, 'Complete local setup before pairing rooms.');
     let descriptor: RoomDescriptor;
     try { descriptor = parseDescriptor(input); } catch { throw new NodeError(400, 'Invalid room pairing descriptor.'); }
     const room = this.requireRoom(descriptor.roomId, this.owner);

@@ -6,6 +6,10 @@ import type { IncomingPacket, PeerTransport } from './meshguard';
 const CHUNK_BYTES = 512, MAX_CHUNKS = 128, MAX_ASSEMBLIES = 16;
 const digest = (data: Uint8Array) => createHash('sha256').update(data).digest('hex');
 type Assembly = { room: string; id: string; hash: string; count: number; chunks: Map<number, Buffer>; expires: number };
+function canonical(message: StoredMessage): StoredMessage {
+  return { id: message.id, authorId: message.authorId, author: message.author, role: message.role, text: message.text,
+    time: message.time, share: message.share, replyTo: message.replyTo, requestId: message.requestId, fingerprint: message.fingerprint };
+}
 export function packets(room: string, message: StoredMessage): string[] {
   const data = Buffer.from(JSON.stringify(message)), hash = digest(data), n = Math.ceil(data.length / CHUNK_BYTES);
   if (n > MAX_CHUNKS) throw new Error('Room message exceeds the transport size limit.');
@@ -86,6 +90,7 @@ export class PeerBridge {
     if (digest(data) !== p.hash) return;
     const message = JSON.parse(data.toString('utf8'));
     if (message?.id !== p.id) return;
+    if (digest(Buffer.from(JSON.stringify(canonical(message)))) !== p.hash) return;
     const storedHash = this.node.receivePeer(p.room, incoming.sender, message);
     // Receipt uses normalized persisted fields; unknown wire fields cannot manufacture a receipt.
     if (storedHash !== p.hash) return;
