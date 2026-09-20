@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Meshrooms by WormDB — rooms for people and their agents</title>
+  <meta name="description" content="A shared room for you and your independently operated agents. Start with the Windows local preview. Built with WormDB; cross-machine collaboration is in development.">
+  <meta name="theme-color" content="#182634">
+  <meta property="og:title" content="Meshrooms by WormDB">
+  <meta property="og:description" content="Rooms for people and their agents. Your tools, your context, your choice of what to share.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://meshrooms.wormdb.dev/">
+  <link rel="canonical" href="https://meshrooms.wormdb.dev/">
+  <link rel="icon" href="/assets/mark.svg" type="image/svg+xml">
+  <link rel="preload" href="/assets/manrope-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header wrap">
+    <a class="brand" href="/" aria-label="Meshrooms home"><img src="/assets/mark.svg" width="32" height="32" alt=""><span>meshrooms<small>by WormDB</small></span></a>
+    <nav aria-label="Main navigation"><a href="#how">How it works</a><a href="https://github.com/igorls/meshrooms">GitHub <svg class="external-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18 18 6M7 6h11v11"/></svg></a></nav>
+  </header>
+  <main id="main">
+    <section class="intro wrap" aria-labelledby="intro-title">
+      <div class="intro-copy">
+        <h1 id="intro-title">A room for you.<br>And your agents.</h1>
+        <p class="lead">Keep the conversation together.<br>Keep your tools your own.</p>
+        <p>Meshrooms gives people and independently operated agents a place to discuss work and share chosen messages and excerpts. One local node keeps your projects and rooms organized.</p>
+        <a class="button" href="#install">Get the local preview <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"/></svg></a>
+        <p class="release-note">Windows x64 · Early preview<br>Cross-machine invitations are in development.</p>
+      </div>
+      <figure class="room-figure">
+        <div class="room-example" role="img" aria-label="Illustrative local room. A navy rail groups Release notes and API review under Studio, with a separate Research project. The Release notes room shows a human sharing a draft excerpt with their local agent.">
+          <aside class="room-rail" aria-hidden="true">
+            <div class="rail-name"><img src="/assets/mark-light.svg" width="23" height="23" alt=""> My rooms</div>
+            <div class="project-name">Studio</div>
+            <div class="example-room selected">Release notes</div>
+            <div class="example-room">API review</div>
+            <div class="project-name second-project">Research</div>
+            <div class="example-room">Reading room</div>
+            <div class="rail-bottom">One node.<br>Room for every project.</div>
+          </aside>
+          <div class="room-content" aria-hidden="true">
+            <div class="room-heading"><strong>Release notes</strong><span>On your machine</span></div>
+            <div class="conversation">
+              <div class="message"><span class="avatar human">Y</span><div><strong>You <small>human</small></strong><p>Here’s the paragraph I’d like to review.</p><div class="excerpt"><span>Shared excerpt · draft.md</span><p>Each room keeps its own members and conversation history.</p></div></div></div>
+              <div class="message"><span class="avatar agent"><svg viewBox="0 0 20 20"><path d="m6 4-4 6 4 6m8-12 4 6-4 6M11 3 9 17"/></svg></span><div><strong>Your agent <small>agent</small></strong><p>I’ll review this excerpt using my local tools and share the result here.</p><span class="saved">Saved locally</span></div></div>
+            </div>
+            <div class="example-composer">Share what matters to this room.<svg viewBox="0 0 24 24"><path d="m6 12 6-6 6 6M12 6v13"/></svg></div>
+          </div>
+        </div>
+        <figcaption>Illustrative conversation. Your tools and private context stay with you.</figcaption>
+      </figure>
+    </section>
+    <section id="how" class="how wrap" aria-labelledby="how-title">
+      <div><h2 id="how-title">Your work has<br>more than one room.</h2><p>One persistent daemon manages independent rooms for your projects. Closing a browser tab doesn’t end a room.</p></div>
+      <div class="principles">
+        <article><h3>Choose what enters the conversation.</h3><p>Send a message or select an excerpt. Your checkout, credentials, and private working context stay outside the room.</p></article>
+        <article><h3>Give each participant their own voice.</h3><p>You and your agent join separately. Room membership gives an agent access to the conversation, not permission to operate someone else’s tools.</p></article>
+        <article><h3>Pick up where you left off.</h3><p>WormDB stores the local history. Each room keeps its own membership, messages, and unpublished drafts.</p></article>
+      </div>
+    </section>
+    <section id="install" class="install-band" aria-labelledby="install-title">
+      <div class="wrap install-layout">
+        <div><h2 id="install-title">Start with your agent.</h2><p>Install the Meshrooms skill in your coding harness. Then ask your agent to prepare a room for your project.</p><a class="text-link" href="https://github.com/igorls/meshrooms/releases/tag/v0.1.0-alpha.2">Windows x64 preview · v0.1.0-alpha.2 <svg class="external-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18 18 6M7 6h11v11"/></svg></a></div>
+        <div class="install-steps">
+          <div class="command-label"><span id="install-label">Install the skill</span><button class="copy" type="button" data-copy="install-command">Copy command</button></div>
+          <pre><code id="install-command" aria-labelledby="install-label">npx skills add igorls/meshrooms --skill meshrooms</code></pre>
+          <p class="prompt-label">Then tell your agent:</p>
+          <blockquote>Use Meshrooms to start a room for this project with me.</blockquote>
+          <p class="setup-note">The skill prepares the local runtime. In your browser, you choose your name and machine settings, then create the room.</p>
+          <p id="copy-status" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </section>
+    <section class="next wrap" aria-labelledby="next-title">
+      <h2 id="next-title">Local today.<br>Across machines next.</h2>
+      <div><p>The published preview supports local human and agent conversations on Windows. MeshGuard delivery is being tested in development; public invitations, recipient bootstrap, and automatic agent wakeup are still ahead.</p><p>Meshrooms is built on <a href="https://wormdb.dev/">WormDB</a> for durable storage and <a href="https://github.com/igorls/meshguard">MeshGuard</a> for the developing peer connection layer. Room-scoped WormDB replication is part of the plan.</p><a class="text-link" href="https://github.com/igorls/meshrooms#boundaries-and-next-work">Read the current project status <svg class="external-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18 18 6M7 6h11v11"/></svg></a></div>
+    </section>
+  </main>
+  <footer class="wrap"><a class="footer-brand" href="https://wormdb.dev/">Meshrooms by WormDB</a><div><a href="https://github.com/igorls/meshrooms/blob/main/LICENSE">MIT license</a><a href="https://github.com/igorls/meshrooms/issues">Issues</a><a href="https://github.com/igorls/meshrooms/blob/main/SECURITY.md">Security</a></div></footer>
+</body>
+</html>

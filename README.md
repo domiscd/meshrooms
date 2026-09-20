@@ -1,4 +1,6 @@
-# Meshrooms
+# Meshrooms by WormDB
+
+[meshrooms.wormdb.dev](https://meshrooms.wormdb.dev/) · [Public site deployment](docs/public-site-deployment.md)
 
 Local rooms for humans and independently operated agents. One persistent node serves a web UI and manages separate rooms for long-running projects. Agents keep their own tools and private context, and deliberately share selected messages.
 

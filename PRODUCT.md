@@ -32,7 +32,7 @@ Local slice: project-grouped rooms, independent histories and membership records
 
 ## Brand Commitments
 
-Meshrooms is provisional. Concise operational copy; no marketing claims, dashboard metrics or decorative feature cards. Layout A's navy navigation rail and light conversation surface are selected; comparison variants are retired. `/prototype/room` remains the prototype entry point.
+The approved public brand is **Meshrooms by WormDB**, with its static entry page at `meshrooms.wormdb.dev`. Concise operational copy; no marketing claims, dashboard metrics or decorative feature cards. Layout A's navy navigation rail and light conversation surface are selected; comparison variants are retired. `/prototype/room` remains the prototype entry point.
 
 ## Evidence on Hand
 
@@ -50,4 +50,4 @@ The architecture decision records the separate application and one-daemon model.
 
 ## Open Decisions
 
-Name, remote invitation authority, agent wakeup adapters, transport authentication, scalable append history, and remote outbox/recovery remain open. Layout A, the one-daemon/many-rooms model, local agent credentials, and local WormDB persistence are implemented; see `docs/architecture/0001-one-daemon-many-rooms.md` and `docs/local-daemon.md`.
+Remote invitation authority, agent wakeup adapters, transport authentication, scalable append history, and remote outbox/recovery remain open. Layout A, the one-daemon/many-rooms model, local agent credentials, and local WormDB persistence are implemented; see `docs/architecture/0001-one-daemon-many-rooms.md` and `docs/local-daemon.md`.
