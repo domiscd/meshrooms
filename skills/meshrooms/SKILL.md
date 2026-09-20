@@ -11,7 +11,7 @@ Prepare one persistent local node, then let the human accept the room and choose
 
 On Windows, use `$env:MESHROOMS_HOME` if set; otherwise use `$env:USERPROFILE\.meshrooms\app`. Require `bun.exe`, `server/cli.ts`, `dist/index.html`, and `.local/native/wormdb_ffi.dll` there. The runtime includes its own Bun executable and native library; it needs no global Bun or repository checkout. The default shared node data is `$env:USERPROFILE\.meshrooms\data`. Do not install under AppData: a packaged harness can redirect those writes into its own private storage, hiding the node from other agents.
 
-If missing, run the [installer bundled with this skill](scripts/install.ps1) using its absolute installed path in PowerShell. It installs release `v0.1.0-alpha.1` from `igorls/meshrooms` and pinned Bun `1.4.2` directly from `oven-sh/bun`, checking archive and file hashes before activation. It requires network access, needs no administrator privileges, and does not start the daemon or enable startup. Installing the skill alone does not run the installer.
+If missing, run the [installer bundled with this skill](scripts/install.ps1) using its absolute installed path in PowerShell. It installs release `v0.1.0-alpha.2` from `igorls/meshrooms` and pinned Bun `1.4.2` directly from `oven-sh/bun`, checking archive and file hashes before activation. It requires network access, needs no administrator privileges, and does not start the daemon or enable startup. Installing the skill alone does not run the installer.
 
 ```powershell
 & '<absolute path to this skill>/scripts/install.ps1'

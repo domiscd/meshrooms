@@ -18,7 +18,7 @@ Then ask your agent:
 
 The skill prepares or reuses the local daemon and opens a pending room request. You choose your display name and machine preferences, then explicitly create the room. You and your agent appear separately. Repeating the same request reuses the existing room and credentials.
 
-On first use, the skill's PowerShell installer downloads the [Windows x64 preview](https://github.com/igorls/meshrooms/releases/tag/v0.1.0-alpha.1), verifies its checksums, and installs the app with its WormDB DLL. It fetches pinned Bun 1.4.2 directly from upstream. No global Bun, Zig, administrator access, or repository checkout is required. Installation itself does not start a daemon or enable startup, and it refuses to overwrite an existing runtime.
+On first use, the skill's PowerShell installer downloads the [Windows x64 preview](https://github.com/igorls/meshrooms/releases/tag/v0.1.0-alpha.2), verifies its checksums, and installs the app with its WormDB DLL. It fetches pinned Bun 1.4.2 directly from upstream. No global Bun, Zig, administrator access, or repository checkout is required. Installation itself does not start a daemon or enable startup, and it refuses to overwrite an existing runtime.
 
 ## What works
 

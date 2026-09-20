@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.1.0-alpha.1
+## 0.1.0-alpha.2
+
+First published preview. Fixes the tag workflow's artifact upload from a hidden
+staging directory. The alpha.1 qualification candidate was not published as a release.
 
 Initial public preview of the local creator flow:
 

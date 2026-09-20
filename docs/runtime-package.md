@@ -42,7 +42,7 @@ Every package includes a Schema 1 integrity manifest:
   "schema": 1,
   "platform": "win32",
   "arch": "x64",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "bun": { "version": "1.4.2", "bundled": false },
   "git": {
     "commit": "7a1d7c64fdc30b542a8c35ec07db50031725910d",
