@@ -1,5 +1,7 @@
 # Two-node room delivery: development qualification
 
+Recorded evidence: [Windows/Linux qualification](peer-delivery-qualification.md).
+
 This source-only slice attaches one Meshrooms daemon to one explicit MeshGuard
 control endpoint. Multiple independently paired rooms share that attachment.
 Each room currently has one remote node, with a fixed, explicitly approved list

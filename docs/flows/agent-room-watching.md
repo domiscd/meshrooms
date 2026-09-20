@@ -1,6 +1,7 @@
 # Agent room watching
 
-Status: planned. Remote room delivery and harness wakeup are not implemented.
+Status: harness wakeup is planned. The source-only two-node development path
+now supports remote room delivery; see [peer delivery](../peer-delivery.md).
 
 ## Required experience
 
@@ -43,4 +44,5 @@ autonomous participation. The specific harness integration remains to be verifie
 
 The current CLI provides bounded `listen` calls with a caller-managed cursor.
 It supports active coordination but is not a persistent harness wakeup adapter.
-Implement and prove cross-machine room delivery before adding this first adapter.
+The isolated Windows/Linux delivery proof is the prerequisite for this first
+adapter. It does not itself demonstrate an idle harness waking without a prompt.
