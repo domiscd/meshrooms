@@ -88,7 +88,7 @@ components:
 
 ## Overview
 
-The user selected layout A on 2026-09-20. Cool paper, slate text, blue actions and a navy room rail support a conversation surface with multiple independent rooms grouped by project. The name remains provisional. The current refinement brief is `docs/room-surface.md`; B/C and the comparison switcher are retired.
+The user selected layout A on 2026-09-20. Cool paper, slate text, blue actions and a navy room rail support a conversation surface with multiple independent rooms grouped by project. The approved public brand is **Meshrooms by WormDB**. The current refinement brief is `docs/room-surface.md`; B/C and the comparison switcher are retired.
 
 The shared vocabulary is open transcript rows, compact state labels, restrained borders and explicit share previews. There are no shipping raster assets; the wordmark and interface icons are inline SVG.
 
@@ -140,5 +140,32 @@ Small rounded labels, gently rounded controls and larger rounded containers esta
 - **Do** preserve explicit local-demo and example state labels.
 - **Do** keep typography, action colors and message components consistent across rooms.
 - **Do** retain keyboard focus visibility and reduced-motion behavior.
-- **Don't** present the provisional name or future persistent-daemon capabilities as implemented.
+- **Don't** present future cross-machine invitations, recipient bootstrap, agent wakeup, or native room replication as released capabilities.
 - **Don't** add marketing claims, dashboard metrics or decorative feature cards; these are excluded by the current product brief.
+
+## Public entry page
+
+`website/index.html` extends the selected room language into a reading and
+installation surface; its direction contract is `docs/public-site.md`. It uses
+self-hosted Manrope Variable, cool paper, the navy room rail, blue actions, and
+an explicitly illustrative local transcript. Human avatars remain round and
+agent avatars remain rounded squares. There are no shipping raster assets.
+
+The page uses a 16px body base, 15px supporting prose, a 38–60px responsive hero
+(42px on phones), 29–40px section headings, 18px subheadings, and 11–14px
+metadata/actions. The larger reading scale belongs to this public surface;
+the local room's denser type roles remain unchanged. The installation command
+uses Cascadia Code/Consolas/monospace and wraps on phones. All functional and
+illustrative metadata has an 11px minimum.
+
+The installation section extends navy with secondary text `#c4d1de`, link
+text `#a8c2ff`, command background `#253849`, and copy feedback `#d7e6ff`.
+These tints preserve contrast on the existing dark ground. White and
+`#f2f6f9` remain its primary text colors. Authored outline SVGs use a 1.7px
+stroke for navigation and action arrows.
+
+Desktop uses a two-column introduction; at 860px it stacks in reading order.
+The primary action leads to the exact skill command, paired with a copy button
+and a live success/failure message. The Windows local-preview boundary stays
+visible beside the action. Reduced motion disables smooth scrolling and
+transitions; keyboard focus exposes the skip link and control outlines.
