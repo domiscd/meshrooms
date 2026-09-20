@@ -9,7 +9,19 @@ export interface PeerTransport {
 }
 
 /** One command per IPC connection. Never falls back to the shared legacy inbox. */
-export function controlCommand(path: string, command: string): Promise<any> {
+export async function controlCommand(path: string, command: string): Promise<any> {
+  const deadline = Date.now() + 500;
+  while (true) {
+    try { return await controlAttempt(path, command); }
+    catch (error: any) {
+      // The Windows server recreates its one-shot named pipe between commands.
+      // Retry only failed connects, always against the exact configured endpoint.
+      if (Date.now() >= deadline || !['ENOENT', 'EBUSY', 'ECONNREFUSED'].includes(error?.code)) throw error;
+      await new Promise(resolve => setTimeout(resolve, 15));
+    }
+  }
+}
+function controlAttempt(path: string, command: string): Promise<any> {
   if (/[\r\n\0]/.test(command) || Buffer.byteLength(command) > 4096) return Promise.reject(new Error('Invalid MeshGuard command.'));
   return new Promise((resolve, reject) => {
     const socket = createConnection(path); let data = Buffer.alloc(0); let finished = false;
