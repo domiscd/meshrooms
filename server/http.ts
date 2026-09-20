@@ -3,12 +3,14 @@ import { isAbsolute, relative, resolve } from 'node:path';
 import { LocalNode, NodeError, type Principal } from './node';
 import { NodeAccess } from './access';
 import type { StartupManager } from './startup';
+import type { PeerBridge } from './peer-bridge';
 
 type HttpOptions = { node: LocalNode; origins: string[]; distDir: string; dataDir: string; access: NodeAccess;
-  startup: StartupManager; runtime: { apiVersion: number; instanceId: string; pid: number }; proof: (challenge: string) => string };
+  startup: StartupManager; runtime: { apiVersion: number; instanceId: string; pid: number }; proof: (challenge: string) => string;
+  bridge?: PeerBridge; localPeerKey?: string };
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
 
-export function createHandler({ node, origins, distDir, dataDir, access, startup, runtime, proof }: HttpOptions) {
+export function createHandler({ node, origins, distDir, dataDir, access, startup, runtime, proof, bridge, localPeerKey }: HttpOptions) {
   const allowedOrigins = new Set(origins);
   const allowedHosts = new Set(origins.map(origin => new URL(origin).host));
   let views = 0;
@@ -87,6 +89,14 @@ export function createHandler({ node, origins, distDir, dataDir, access, startup
           response.headers.set('Set-Cookie', access.exchangeBrowserTicket(body.ticket)); return response;
         }
         const principal = access.principal(request);
+        if (url.pathname === '/api/node/transport' || url.pathname === '/api/node/rooms/descriptor' || url.pathname === '/api/node/rooms/pair') {
+          node.requireOwner(principal);
+          if (request.method === 'GET' && url.pathname === '/api/node/transport') return json({ enabled: !!bridge, ...bridge?.status() });
+          if (!bridge || !localPeerKey) throw new NodeError(409, 'Configure an explicit MeshGuard attachment before pairing rooms.');
+          if (request.method === 'GET' && url.pathname === '/api/node/rooms/descriptor') return json(node.descriptor(url.searchParams.get('roomId'), localPeerKey));
+          if (request.method === 'POST' && url.pathname === '/api/node/rooms/pair') return json(node.pairRoom(await input(request), localPeerKey));
+          throw new NodeError(405, 'Unsupported transport command.');
+        }
         if (request.method === 'GET' && url.pathname === '/api/node/snapshot') { node.touch(principal); return json(node.snapshot(principal)); }
         if (request.method === 'GET' && url.pathname === '/api/node/events') return events(request, principal);
         if (request.method === 'GET' && url.pathname === '/api/node/setup') {

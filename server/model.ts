@@ -12,11 +12,12 @@ export const isHash = (value: unknown): value is string => typeof value === 'str
 export const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 export const historyKey = (roomId: string) => `meshrooms/v1/rooms/${roomId}/history`;
-export type RoomRecord = RoomInfo & { participantIds: string[]; requestId: string; fingerprint: string };
+export type RoomPeer = { key: string; participantIds: string[]; excluded: string[]; acknowledged: string[] };
+export type RoomRecord = RoomInfo & { participantIds: string[]; requestId: string; fingerprint: string; peer?: RoomPeer };
 export type IntentRecord = PendingRoom & { agentId: string; tokenHash: string; fingerprint: string };
 export type Settings = { completed: boolean; machineName: string; startAtLogin: boolean };
 export type Catalog = {
-  version: 2; nodeId: string; ownerId: string; participants: Participant[]; rooms: RoomRecord[];
+  version: 3; nodeId: string; ownerId: string; participants: Participant[]; rooms: RoomRecord[];
   settings: Settings; intents: IntentRecord[]; setupReceipts: { id: string; fingerprint: string; roomId?: string }[];
 };
 export type StoredMessage = Message & { requestId: string; fingerprint: string };
@@ -26,11 +27,11 @@ export type Principal = { kind: 'owner'; participantId: string } | { kind: 'agen
 function named(value: unknown, max: number): value is string { return typeof value === 'string' && !!value.trim() && value.length <= max; }
 function participant(value: any): value is Participant {
   return !!value && isUuid(value.id) && named(value.name, 64) && ['human', 'agent'].includes(value.role)
-    && value.state === 'local' && typeof value.detail === 'string';
+    && (value.state === 'local' ? value.peerKey === undefined : value.state === 'remote' && isHash(value.peerKey)) && typeof value.detail === 'string';
 }
 function unique(values: unknown[]): boolean { return new Set(values).size === values.length; }
 export function validCatalog(value: any): value is Catalog {
-  if (!value || value.version !== 2 || !isUuid(value.nodeId) || !isUuid(value.ownerId)
+  if (!value || value.version !== 3 || !isUuid(value.nodeId) || !isUuid(value.ownerId)
     || !Array.isArray(value.participants) || !value.participants.every(participant) || !unique(value.participants.map((p: Participant) => p.id))
     || !Array.isArray(value.rooms) || value.rooms.length > MAX_ROOMS || !unique(value.rooms.map((r: RoomRecord) => r?.id))
     || !unique(value.rooms.map((r: RoomRecord) => r?.requestId))
@@ -39,11 +40,17 @@ export function validCatalog(value: any): value is Catalog {
     || !unique(value.intents.map((i: IntentRecord) => i?.agentId)) || !unique(value.intents.map((i: IntentRecord) => i?.tokenHash))
     || !Array.isArray(value.setupReceipts) || value.setupReceipts.length > 256 || !unique(value.setupReceipts.map((r: any) => r?.id))) return false;
   const people = new Map<string, Participant>(value.participants.map((p: Participant) => [p.id, p]));
-  if (people.get(value.ownerId)?.role !== 'human' || value.participants.filter((p: Participant) => p.role === 'human').length !== 1) return false;
+  if (people.get(value.ownerId)?.role !== 'human' || people.get(value.ownerId)?.state !== 'local'
+    || value.participants.filter((p: Participant) => p.role === 'human' && p.state === 'local').length !== 1) return false;
   if (!value.rooms.every((r: any) => r && isUuid(r.id) && isUuid(r.requestId) && isHash(r.fingerprint)
     && named(r.title, 64) && typeof r.project === 'string' && r.project.length <= 48 && r.sample === false
     && Array.isArray(r.participantIds) && unique(r.participantIds) && r.participantIds.includes(value.ownerId)
-    && r.participantIds.every((id: string) => people.has(id)))) return false;
+    && r.participantIds.every((id: string) => people.has(id))
+    && (r.peer === undefined ? r.participantIds.every((id: string) => people.get(id)?.state === 'local')
+      : isHash(r.peer.key) && Array.isArray(r.peer.participantIds) && r.peer.participantIds.length > 0 && r.peer.participantIds.length <= 16
+        && unique(r.peer.participantIds) && r.peer.participantIds.every((id: string) => r.participantIds.includes(id) && people.get(id)?.peerKey === r.peer.key)
+        && r.participantIds.every((id: string) => people.get(id)?.state === 'local' || r.peer.participantIds.includes(id))
+        && [r.peer.excluded, r.peer.acknowledged].every(ids => Array.isArray(ids) && ids.length <= MAX_MESSAGES && unique(ids) && ids.every(isUuid))))) return false;
   if (!value.intents.every((i: any) => i && isUuid(i.id) && isUuid(i.agentId) && isHash(i.tokenHash) && isHash(i.fingerprint)
     && named(i.title, 64) && named(i.agentName, 64) && typeof i.project === 'string' && i.project.length <= 48
     && (i.status === 'pending' ? i.roomId === undefined && !people.has(i.agentId)
@@ -59,12 +66,20 @@ export function migrateV1(value: any, machineName: string): Catalog {
     || !Array.isArray(value.rooms) || !value.rooms.every((room: any) => Array.isArray(room?.participants)
       && room.participants.length === 1 && room.participants[0].id === owner.id && participant(room.participants[0]))) throw new Error('Invalid legacy catalog');
   const result: Catalog = {
-    version: 2, nodeId: value.nodeId, ownerId: owner.id, participants: [owner],
+    version: 3, nodeId: value.nodeId, ownerId: owner.id, participants: [owner],
     rooms: value.rooms.map(({ participants: _, ...room }: any) => ({ ...room, participantIds: [owner.id] })),
     settings: { completed: false, machineName, startAtLogin: false }, intents: [], setupReceipts: [],
   };
   if (!validCatalog(result)) throw new Error('Invalid legacy catalog');
   return result;
+}
+
+export function migrateV2(value: any): Catalog {
+  if (!value || value.version !== 2 || !Array.isArray(value.rooms) || value.rooms.some((r: any) => r?.peer !== undefined)
+    || !Array.isArray(value.participants) || value.participants.some((p: any) => p?.state !== 'local' || p?.peerKey !== undefined)) throw new Error('Invalid v2 catalog');
+  const next = { ...value, version: 3 };
+  if (!validCatalog(next)) throw new Error('Invalid v2 catalog');
+  return next;
 }
 
 export function validHistory(value: any, room: RoomRecord, people: Participant[]): value is History {

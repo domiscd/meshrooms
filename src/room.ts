@@ -4,7 +4,8 @@ export type Participant = {
   id: string;
   name: string;
   role: Role;
-  state: 'local' | 'example-idle' | 'example-offline';
+  state: 'local' | 'remote' | 'example-idle' | 'example-offline';
+  peerKey?: string;
   detail: string;
   connected?: boolean;
 };
@@ -20,7 +21,7 @@ export type Message = {
   share?: Share;
 };
 export type RoomInfo = { id: string; title: string; project: string; sample: boolean };
-export type RoomSnapshot = RoomInfo & { messages: Message[]; participants: Participant[] };
+export type RoomSnapshot = RoomInfo & { messages: Message[]; participants: Participant[]; paired?: boolean };
 export type NodeSnapshot = {
   backend: 'demo' | 'local';
   storage: 'memory' | 'wormdb';
