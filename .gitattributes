@@ -1,0 +1,10 @@
+* text=auto
+*.ts text eol=lf
+*.tsx text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.ps1 text eol=lf
+*.wal binary
+*.png binary
+*.woff2 binary
