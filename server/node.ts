@@ -133,6 +133,9 @@ export class LocalNode {
     const receipt = this.catalog.setupReceipts.find(r => r.id === command.requestId);
     if (receipt) this.assertRetry(receipt.fingerprint, fingerprint(command));
     else if (this.catalog.setupReceipts.length >= 256) throw new NodeError(409, 'This local beta has reached its settings update limit.');
+    else if (command.humanName !== this.person(this.catalog.ownerId).name && this.catalog.rooms.some(room => room.peer)) {
+      throw new NodeError(409, 'Paired rooms use a fixed participant grant. Keep your current name until updating peer grants is supported.');
+    }
     return command;
   }
   setupResult(command: SetupCommand): { roomId?: string } | undefined {
@@ -251,6 +254,7 @@ export class LocalNode {
     const history = this.histories.get(roomId)!;
     const existing = history.messages.find(m => m.id === message.id || (m.authorId === message.authorId && m.requestId === message.requestId));
     if (existing) { this.assertRetry(fingerprint(existing), fingerprint(message)); return fingerprint(existing); }
+    if (message.replyTo && room.peer.excluded.includes(message.replyTo)) throw new NodeError(400, 'The remote reply target predates pairing.');
     const next: History = { ...history, version: 2, messages: [...history.messages, message] };
     if (message.author !== this.person(message.authorId).name || message.fingerprint !== fingerprint({ text: message.text, share: message.share, replyTo: message.replyTo })
       || !validHistory(next, room, this.catalog.participants) || Buffer.byteLength(JSON.stringify(next)) > MAX_HISTORY_BYTES) throw new NodeError(400, 'Invalid remote room message.');

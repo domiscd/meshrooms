@@ -19,6 +19,8 @@ Both nodes must explicitly pair the same stable room ID. The local owner imports
 the other node's descriptor (public transport key and allowed participant IDs,
 names, and roles). Reachability, a room title, or an incoming message never grants
 membership. This manual development grant is not a shareable invitation.
+Changing the local owner's name is blocked while a room is paired, because
+this slice cannot update the name in the other node's fixed grant.
 
 Pairing publishes only subsequent local messages, with their explicitly shared
 excerpts. Existing history stays private; replies to that old history must be

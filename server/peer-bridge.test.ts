@@ -85,16 +85,28 @@ test('a failed receiving store never produces a remote receipt; retry recovers a
 test('pairing does not publish old history and rejects conflicting grants and message retries', () => {
   const db = database(), a = node(db), b = node(), room = randomUUID();
   a.createRoom({ title: 'Room', requestId: room }); b.createRoom({ title: 'Room', requestId: room });
-  a.send({ roomId: room, requestId: randomUUID(), text: 'Before pairing' });
+  const beforePairing = a.send({ roomId: room, requestId: randomUUID(), text: 'Before pairing' });
   const descriptor = b.descriptor(room, 'b'.repeat(64));
   a.pairRoom(descriptor, 'a'.repeat(64)); a.pairRoom(descriptor, 'a'.repeat(64));
   expect(a.pendingDelivery()[0].messages).toHaveLength(0);
   expect(() => a.pairRoom({ ...descriptor, peerKey: 'c'.repeat(64) }, 'a'.repeat(64))).toThrow('already paired');
   b.pairRoom(a.descriptor(room, 'a'.repeat(64)), 'b'.repeat(64)); b.send({ roomId: room, requestId: randomUUID(), text: 'Original' });
   const incoming = b.pendingDelivery()[0].messages[0]; a.receivePeer(room, 'b'.repeat(64), incoming);
+  const privateReply = { ...incoming, id: randomUUID(), requestId: randomUUID(), replyTo: beforePairing.messageId,
+    fingerprint: fingerprint({ text: incoming.text, share: incoming.share, replyTo: beforePairing.messageId }) };
+  expect(() => a.receivePeer(room, 'b'.repeat(64), privateReply)).toThrow('predates pairing');
   const changed = { ...incoming, text: 'Changed', fingerprint: fingerprint({ text: 'Changed' }) };
   expect(() => a.receivePeer(room, 'b'.repeat(64), changed)).toThrow('different content');
   a.close(); expect(node(db).snapshot().rooms[0].messages.map(m => m.text)).toEqual(['Before pairing', 'Original']);
+});
+
+test('paired fixed grants reject owner renames before settings can strand delivery', () => {
+  const f = fixture();
+  const original = { requestId: randomUUID(), humanName: f.a.settings.humanName, machineName: 'Updated node', startAtLogin: false };
+  f.a.completeSetup(original);
+  expect(f.a.completeSetup(original)).toEqual({});
+  expect(() => f.a.completeSetup({ ...original, requestId: randomUUID(), humanName: 'Renamed owner' })).toThrow('fixed participant grant');
+  expect(f.a.settings.humanName).toBe('Test Codex owner');
 });
 
 test('offline attachment keeps messages pending and malformed frames cannot create authors or receipts', async () => {
