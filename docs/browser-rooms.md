@@ -85,10 +85,14 @@ and storage receipts, reload identity/history, companion authorship, removing on
 device, decline/cancel, duplicate-tab handling, and desktop/tablet/mobile layout.
 The room UI keeps the composer visible while history scrolls. Browser checks also
 cover unread-message navigation, drafts and focus when closing Room details, and
-Enter to send / Shift+Enter for a new line. This
-does not qualify Safari or a real Mac, NAT traversal between networks, or TURN.
-No default external ICE server is silently used. Relay credentials can be issued,
-but configuring a TURN URL is not evidence of a working relay route.
+Enter to send / Shift+Enter for a new line.
+
+On 2026-09-22, hosted Chromium checks passed against revision `db1602e` with
+UDP and TLS relay forced separately; selected ICE candidate pairs confirmed the
+relay routes. The TLS run also verified conversation recovery after a live
+coordinator restart. These checks used isolated contexts on one Windows machine;
+Safari, a real Mac, and peers on different networks remain unqualified.
+Local development does not silently use an external ICE server.
 
 For broader qualification: exercise real Windows/Apple Silicon browsers over HTTPS,
 test sleep recovery, expand public-service abuse controls and room lifecycle UI,

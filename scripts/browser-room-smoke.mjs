@@ -122,7 +122,7 @@ try {
   await host.setViewportSize({ width: 1365, height: 900 });
   const overflow = await guest.evaluate(() => document.documentElement.scrollWidth > innerWidth);
   assert.equal(overflow, false, 'Mobile view must not overflow horizontally.');
-  const routes = await host.evaluate(async () => {
+  const collectRoutes = () => host.evaluate(async () => {
     const pairs = [];
     for (const peer of window.__testPeers) {
       if (peer.connectionState !== 'connected') continue;
@@ -134,7 +134,15 @@ try {
     }
     return pairs;
   });
-  assert.ok(routes.length >= 2 && routes.every(r => r.state === 'succeeded'));
+  // Data-channel readiness can precede Chromium's selected-pair stats after
+  // renegotiation. Wait for the evidence, never infer a relay from configuration.
+  let routes = await collectRoutes();
+  const statsDeadline = Date.now() + 10_000;
+  while (!(routes.length >= 2 && routes.every(r => r.state === 'succeeded')) && Date.now() < statsDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    routes = await collectRoutes();
+  }
+  assert.ok(routes.length >= 2 && routes.every(r => r.state === 'succeeded'), `Selected ICE routes: ${JSON.stringify(routes)}`);
   if (process.env.MESHROOMS_TEST_FORCE_RELAY === '1') assert.ok(routes.every(r => r.local === 'relay' || r.remote === 'relay'));
   const reading = 'An earlier discussion worth keeping in view.\n'.repeat(40);
   await send(host, reading); await guest.getByText(reading.trim(), { exact: true }).waitFor();
