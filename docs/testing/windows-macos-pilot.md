@@ -132,6 +132,13 @@ After LAN success, optionally repeat the same sequence across different networks
 and record actual reachability/relay conditions. Do not infer WAN reliability
 from LAN success or silently open router ports.
 
+Before inviting another tester, complete two successful Windows/Mac sessions,
+including Mac sleep/wake and disconnect/reconnect. Require unchanged identity,
+eventual receipts, exact-once visible messages and no private-room exposure;
+diagnose and repeat any failed checks. The maintainer's Linux agent follows this
+gate; the trusted Windows collaborator and their agent join after the internal
+group and invitation/bootstrap checks in the [development-room plan](meshrooms-development-room.md).
+
 ## 4. Completion and handoff
 
 Save a sanitized result report with exact pins/hashes, macOS gate output, the

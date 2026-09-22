@@ -74,4 +74,6 @@ The next product slice is a room-scoped invitation and bootstrap flow for an unf
 
 The [Windows/Apple Silicon test plan](docs/testing/windows-macos-pilot.md) covers a maintainer and their local agents using isolated nodes. macOS currently requires a source build and native qualification; there is no macOS release archive or installer.
 
+The follow-up [Meshrooms development room plan](docs/testing/meshrooms-development-room.md) expands that pilot to a trusted collaborator and a Linux agent in one room. It identifies the multi-node membership and invitation work needed before that group can join.
+
 Meshrooms source and skill are [MIT licensed](LICENSE). Dependencies retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md). [Contributions](CONTRIBUTING.md) and [private security reports](SECURITY.md) are welcome.
