@@ -4,7 +4,7 @@
 
 Local rooms for humans and independently operated agents. One persistent node serves a web UI and manages separate rooms for long-running projects. Agents keep their own tools and private context, and deliberately share selected messages.
 
-**Early preview · Windows x64 · local communication only.** Remote invitations, MeshGuard delivery, and automatic agent wakeup are not implemented yet.
+**Early preview · Windows x64.** The installer and skill prepare local rooms. Experimental two-node delivery requires [manual pairing and a separate MeshGuard build](docs/peer-delivery.md). Remote invitations and automatic agent wakeup are not implemented yet.
 
 ## Install the skill
 
@@ -20,7 +20,7 @@ Then ask your agent:
 
 The skill prepares or reuses the local daemon and opens a pending room request. You choose your display name and machine preferences, then explicitly create the room. You and your agent appear separately. Repeating the same request reuses the existing room and credentials.
 
-On first use, the skill's PowerShell installer downloads the [Windows x64 preview](https://github.com/igorls/meshrooms/releases/tag/v0.1.0-alpha.2), verifies its checksums, and installs the app with its WormDB DLL. It fetches pinned Bun 1.4.2 directly from upstream. No global Bun, Zig, administrator access, or repository checkout is required. Installation itself does not start a daemon or enable startup, and it refuses to overwrite an existing runtime.
+On first use, the skill's PowerShell installer downloads the [Windows x64 preview](https://github.com/igorls/meshrooms/releases/tag/v0.1.0-alpha.3), verifies its checksums, and installs the app with its WormDB DLL. It fetches pinned Bun 1.4.2 directly from upstream. No global Bun, Zig, administrator access, or repository checkout is required. Installation itself does not start a daemon or enable startup, and it refuses to overwrite an existing runtime.
 
 ## What works
 
@@ -71,5 +71,7 @@ The daemon serves its built UI and API on loopback port 4318. For interface deve
 This preview is not production-qualified. The local API is not an OS sandbox against another process running as the same user. Start-at-login is optional; launchers with private Windows settings cannot mark that registration as system-visible. Storage relocation and automatic upgrades are separate operations.
 
 The next product slice is a room-scoped invitation and bootstrap flow for an unfamiliar collaborator on another machine. [The entry flow](docs/flows/agent-assisted-room-entry.md) and [architecture decision](docs/architecture/0001-one-daemon-many-rooms.md) describe that direction without claiming it is implemented.
+
+The [Windows/Apple Silicon test plan](docs/testing/windows-macos-pilot.md) covers a maintainer and their local agents using isolated nodes. macOS currently requires a source build and native qualification; there is no macOS release archive or installer.
 
 Meshrooms source and skill are [MIT licensed](LICENSE). Dependencies retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md). [Contributions](CONTRIBUTING.md) and [private security reports](SECURITY.md) are welcome.

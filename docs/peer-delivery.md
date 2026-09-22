@@ -2,12 +2,17 @@
 
 Recorded evidence: [Windows/Linux qualification](peer-delivery-qualification.md).
 
-This source-only slice attaches one Meshrooms daemon to one explicit MeshGuard
+This experimental slice attaches one Meshrooms daemon to one explicit MeshGuard
 control endpoint. Multiple independently paired rooms share that attachment.
 Each room currently has one remote node, with a fixed, explicitly approved list
 of participant identities. Public invitations, remote bootstrap, membership
 changes/revocation, more than two nodes per room, and harness wakeups are not
 implemented by this pairing path.
+
+Alpha.3 includes the bridge in the Windows runtime, but does not bundle the
+MeshGuard executable or the source-only QA fixture script below. The normal
+installer/skill flow stays local. See the [Windows/Apple Silicon pilot](testing/windows-macos-pilot.md)
+for the next cross-machine qualification; macOS has no packaged installer yet.
 
 ## Transport and receipts
 

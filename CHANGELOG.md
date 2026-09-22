@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-alpha.3
+
+- Adds experimental two-node room delivery through a separately configured
+  MeshGuard application channel: explicit pairing, bounded message fragmentation,
+  durable remote storage receipts, retries, and restart recovery.
+- Isolates browser/agent event-stream capacity and incomplete peer-message
+  assemblies by principal, room, and peer, within global resource limits.
+- Updates the pinned Windows WormDB library with the integrated security and
+  synchronous persistence fixes, including write-failure fencing and recovery.
+- Includes the Windows/Apple Silicon maintainer test plan and Mac-agent handoff.
+
+The Windows installer still prepares local rooms. MeshGuard is not bundled;
+public invitations, recipient bootstrap, automatic agent wakeup, in-place
+upgrades, and a macOS installer remain unavailable. Existing alpha.2 runtime
+and node data are not upgraded. Test alpha.3 with a separate app and data path;
+the newer catalog cannot be reopened by alpha.2.
+
 ## 0.1.0-alpha.2
 
 First published preview. Fixes the tag workflow's artifact upload from a hidden

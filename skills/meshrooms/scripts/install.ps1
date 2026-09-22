@@ -1,7 +1,7 @@
 # Install a pinned Windows x64 preview without modifying an existing node.
 [CmdletBinding()]
 param(
-    [string]$Version = 'v0.1.0-alpha.2',
+    [string]$Version = 'v0.1.0-alpha.3',
     [string]$InstallDir,
     [string]$ArchivePath,
     [string]$ChecksumPath,

@@ -1,7 +1,7 @@
 {
   "name": "meshrooms",
   "private": true,
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "Local rooms for humans and independently operated agents",
   "license": "MIT",
   "repository": "github:igorls/meshrooms",

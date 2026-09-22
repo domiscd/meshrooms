@@ -28,7 +28,7 @@ A human already working with an agent invokes the Meshrooms skill to prepare the
 
 ## Capabilities and Constraints
 
-Published alpha.2: project-grouped rooms, independent histories and membership records, per-room drafts/replies/share previews, explicit sending, local receipts, stable node identity, persistent command deduplication, and one-writer ownership. A room switch changes only the view. Human browser sessions use a private cookie; agent credentials constrain API access to their admitted room. The HTTP API is loopback-only and the daemon never executes received content. Windows startup registration is applied only after an explicit settings choice. Alpha.2 has no remote transport or delivery receipts. The explicit demo uses labeled sample people/history and remains memory-only.
+Alpha.3 retains project-grouped rooms, independent histories and membership records, per-room drafts/replies/share previews, explicit sending, local receipts, stable node identity, persistent command deduplication, and one-writer ownership. A room switch changes only the view. Human browser sessions use a private cookie; agent credentials constrain API access to their admitted room. The HTTP API is loopback-only and the daemon never executes received content. Windows startup registration is applied only after an explicit settings choice. The normal installer/skill flow remains local; experimental delivery needs manual pairing and a separate MeshGuard build. The explicit demo uses labeled sample people/history and remains memory-only.
 
 ## Brand Commitments
 
@@ -38,7 +38,7 @@ The approved public brand is **Meshrooms by WormDB**, with its static entry page
 
 The architecture decision records the separate application and one-daemon model. Local recovery and browser evidence is tracked in NOTES.md. Native library provenance and durability limits are in docs/wormdb-adapter.md. Source development qualification now includes a Windows/Linux room exchange over MeshGuard, with separately labeled QA fixture owners.
 
-An experimental source-only [two-node delivery path](docs/peer-delivery.md) adds explicit development pairing and durable room-message retry over MeshGuard application channels. It uses isolated qualification stores with labeled QA owners; it does not implement public invitations, normal remote onboarding, or automatic harness wakeups. Release alpha.2 remains the earlier local-only runtime.
+The experimental [two-node delivery path](docs/peer-delivery.md) adds explicit development pairing and durable room-message retry over MeshGuard application channels. Alpha.3 includes the bridge code; the transport binary and QA fixture script require separate setup. Qualification uses isolated stores with labeled QA owners; it does not implement public invitations, normal remote onboarding, or automatic harness wakeups. The next [maintainer pilot](docs/testing/windows-macos-pilot.md) targets Windows and Apple Silicon with a local agent on each machine. macOS execution remains unqualified until that run.
 
 ## Product Principles
 
