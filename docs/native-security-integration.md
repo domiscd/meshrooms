@@ -5,16 +5,17 @@ not a deployment or a published application release.
 
 ## Pinned inputs and artifact
 
-- WormDB source: `b94b5abb0ec32906e962c4f63706237aebb16e0b`.
+- WormDB source: `f96b1aa794904585aaacd9a3c83ff688a031f743`.
 - Includes priority security commit `6a53cd0`, synchronous FFI branch `08124f6`,
   explicit failure cleanup in the new nullable opener, token-expiry event
   revocation with exact binary-channel authorization, and synchronous WAL
   error fencing until reopen/recovery, and allocation/index reservation before
-  durable SET publication.
+  durable SET publication, plus idle-capable accepted replication sessions with
+  partial-frame deadlines retained.
 - MeshGuard source: `fdbfd51bdbc643bae0aff8cb7b11e9372f6a23a8`.
 - Windows x64, Zig 0.16.0, `zig build ffi -Doptimize=ReleaseFast`.
 - DLL size: 1,952,768 bytes.
-- SHA-256: `6c3bf6b4ba3b3326b275aece335fd05169f69c5eba4ab831ba51ea33368d93d4`.
+- SHA-256: `f26d01ce9ea3395d5a68a8656f4c0923a2fafdd99221806de0946a08f7ac065b`.
 
 The existing build script exported clean, exact tracked source and dependency
 pins into a fresh ignored scratch directory. The resulting DLL and provenance

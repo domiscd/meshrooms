@@ -3,7 +3,7 @@
   "dependency": "wormdb",
   "repository": "https://github.com/igorls/wormdb.git",
   "baseCommit": "14af562e16fd8462f14776763c5ea4c00fc32116",
-  "candidateCommit": "b94b5abb0ec32906e962c4f63706237aebb16e0b",
+  "candidateCommit": "f96b1aa794904585aaacd9a3c83ff688a031f743",
   "meshguardCommit": "fdbfd51bdbc643bae0aff8cb7b11e9372f6a23a8",
   "toolchain": {
     "compiler": "zig",
@@ -17,7 +17,7 @@
     "platform": "win32",
     "arch": "x64",
     "size": 1952768,
-    "sha256": "6c3bf6b4ba3b3326b275aece335fd05169f69c5eba4ab831ba51ea33368d93d4",
+    "sha256": "f26d01ce9ea3395d5a68a8656f4c0923a2fafdd99221806de0946a08f7ac065b",
     "requiredSymbols": [
       "wormdb_open",
       "wormdb_open_sync",
@@ -32,6 +32,6 @@
     "visibility": "public",
     "license": "MIT",
     "syncBranchPublished": true,
-    "notes": "Integrated source includes the priority security fixes, exact-byte event reauthorization, wormdb_open_sync, fail-closed direct WAL sync errors and pre-commit live-state reservation. The native artifact is qualified separately from the standalone network server."
+    "notes": "Integrated source includes the priority security fixes, exact-byte event reauthorization, persistent accepted replication sessions, wormdb_open_sync, fail-closed direct WAL sync errors and pre-commit live-state reservation. The native artifact is qualified separately from the standalone network server."
   }
 }
