@@ -1,5 +1,9 @@
 # Agent-assisted room entry
 
+Historical direction: ordinary human entry now uses browser-only room links,
+live host approval, and companion devices. See [browser rooms](../browser-rooms.md).
+The flow below remains context for optional installed-agent setup.
+
 Date: 2026-09-20
 
 Status: the creator's first run (steps 1–3) is implemented for the Windows local

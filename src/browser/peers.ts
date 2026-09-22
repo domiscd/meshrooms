@@ -1,0 +1,143 @@
+import { verify, type BrowserDevice, type RoomStatus } from './protocol';
+import { BrowserApi } from './client';
+import { read, sign, write } from './storage';
+
+type MessageBody = { kind: 'message'; roomId: string; id: string; deviceId: string; memberId: string; text: string; at: number };
+type ReceiptBody = { kind: 'receipt'; roomId: string; id: string; deviceId: string };
+type Packet = { body: MessageBody | ReceiptBody; signature: string };
+export type SavedMessage = { packet: Packet & { body: MessageBody }; targets: string[]; receipts: string[] };
+type Peer = { pc: RTCPeerConnection; session: string; channel?: RTCDataChannel; started: number };
+
+/** Real browser data channels; the lobby carries connection descriptions only. */
+export class BrowserPeers {
+  private peers = new Map<string, Peer>();
+  private status?: RoomStatus;
+  private messages: SavedMessage[] = [];
+  private serial: Promise<unknown> = Promise.resolve();
+  private stopped = false;
+  private pendingIncoming = 0;
+  private key: string;
+  constructor(private api: BrowserApi, private roomId: string, private deviceId: string, private session: string,
+    private changed: (messages: SavedMessage[], connected: string[], added?: SavedMessage) => void, private error: (message: string) => void) {
+    this.key = `messages:${deviceId}:${roomId}`;
+  }
+  async load() { this.messages = await read<SavedMessage[]>(this.key) || []; this.notify(); }
+  private notify(added?: SavedMessage) { if (!this.stopped) this.changed([...this.messages], [...this.peers].filter(([, p]) => p.channel?.readyState === 'open').map(([id]) => id), added); }
+  private transaction<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.serial.then(work); this.serial = next.catch(() => {}); return next;
+  }
+  private async save(messages: SavedMessage[]) {
+    const added = messages.length > this.messages.length ? messages.at(-1) : undefined;
+    await write(this.key, messages); this.messages = messages; this.notify(added);
+  }
+  async send(text: string) {
+    return this.transaction(async () => {
+      if (!this.status?.memberId || this.stopped) throw new Error('Join the room before sending.');
+      if (!text.trim() || text.length > 4000) throw new Error('Write a message of up to 4,000 characters.');
+      if (this.messages.length >= 1000) throw new Error('This preview has reached its local history limit.');
+      const body: MessageBody = { kind: 'message', roomId: this.roomId, id: crypto.randomUUID(), deviceId: this.deviceId, memberId: this.status.memberId, text: text.trim(), at: Date.now() };
+      const packet = { body, signature: await sign(body) };
+      const saved: SavedMessage = { packet, targets: this.status.devices!.filter(d => d.id !== this.deviceId).map(d => d.id), receipts: [] };
+      await this.save([...this.messages, saved]); this.flush();
+    });
+  }
+  private flush() {
+    for (const [id, peer] of this.peers) {
+      if (peer.channel?.readyState !== 'open') continue;
+      let sent = 0;
+      for (const message of this.messages) {
+        if (sent >= 16) break;
+        if (peer.channel.bufferedAmount > 256_000) break;
+        if (message.packet.body.deviceId === this.deviceId && message.targets.includes(id) && !message.receipts.includes(id)) {
+          try { peer.channel.send(JSON.stringify(message.packet)); sent++; } catch { break; } // Persisted outbox retries on the next connection.
+        }
+      }
+    }
+  }
+  private connectChannel(peer: Peer, id: string, channel: RTCDataChannel) {
+    peer.channel = channel;
+    channel.onopen = () => { this.flush(); this.notify(); };
+    channel.onclose = () => this.notify();
+    channel.onmessage = event => {
+      if (typeof event.data !== 'string' || event.data.length > 20_000 || this.pendingIncoming >= 64) return;
+      this.pendingIncoming++;
+      void this.transaction(async () => {
+        if (this.stopped || !this.status?.memberId || this.peers.get(id) !== peer) return;
+        const device = this.status.devices?.find(d => d.id === id); if (!device) return;
+        let packet: Packet;
+        try { packet = JSON.parse(event.data); } catch { return; }
+        const b = packet?.body;
+        if (!b || b.roomId !== this.roomId || b.deviceId !== id || typeof b.id !== 'string' || !/^[a-f0-9-]{36}$/.test(b.id) || typeof packet.signature !== 'string' || !await verify(device.publicKey, b, packet.signature)) return;
+        if (b.kind === 'message') {
+          if (b.memberId !== device.memberId || typeof b.text !== 'string' || !b.text.trim() || b.text.length > 4000 || !Number.isSafeInteger(b.at) || b.at < 0 || b.at > 8_640_000_000_000_000) return;
+          const existing = this.messages.find(m => m.packet.body.id === b.id);
+          if (existing && JSON.stringify(existing.packet.body) !== JSON.stringify(b)) return;
+          if (!existing) {
+            if (this.messages.length >= 1000) throw new Error('Browser history is full. New messages could not be stored.');
+            await this.save([...this.messages, { packet: packet as SavedMessage['packet'], targets: [], receipts: [] }]);
+          }
+          // A receipt means an IndexedDB transaction completed, not that a person read it.
+          const receipt: ReceiptBody = { kind: 'receipt', roomId: this.roomId, id: b.id, deviceId: this.deviceId };
+          if (channel.readyState === 'open') channel.send(JSON.stringify({ body: receipt, signature: await sign(receipt) }));
+        } else if (b.kind === 'receipt') {
+          const m = this.messages.find(m => m.packet.body.id === b.id && m.packet.body.deviceId === this.deviceId);
+          if (m?.targets.includes(id) && !m.receipts.includes(id)) await this.save(this.messages.map(x => x === m ? { ...x, receipts: [...x.receipts, id] } : x));
+        }
+      }).catch(e => this.error(e.message)).finally(() => { this.pendingIncoming--; });
+    };
+  }
+  private peer(device: BrowserDevice & { session?: string }) {
+    const pc = new RTCPeerConnection({ iceServers: this.status?.iceServers || [] });
+    const peer: Peer = { pc, session: device.session!, started: Date.now() };
+    this.peers.set(device.id, peer);
+    pc.ondatachannel = event => this.connectChannel(peer, device.id, event.channel);
+    pc.onconnectionstatechange = () => this.notify();
+    return peer;
+  }
+  private async description(id: string, peer: Peer, offer: boolean) {
+    await peer.pc.setLocalDescription(offer ? await peer.pc.createOffer() : await peer.pc.createAnswer());
+    if (peer.pc.iceGatheringState !== 'complete') await new Promise<void>(resolve => {
+      const finish = () => { clearTimeout(timer); peer.pc.removeEventListener('icegatheringstatechange', check); resolve(); };
+      const check = () => { if (peer.pc.iceGatheringState === 'complete') finish(); };
+      const timer = setTimeout(finish, 4000); peer.pc.addEventListener('icegatheringstatechange', check); check();
+    });
+    if (this.stopped || this.peers.get(id) !== peer) return;
+    await this.api.command('signal', this.roomId, { to: id, session: this.session, targetSession: peer.session, description: peer.pc.localDescription!.toJSON() });
+  }
+  async update(status: RoomStatus) {
+    if (this.stopped) return;
+    if (this.status && this.status.epoch !== status.epoch) this.disconnect();
+    this.status = status;
+    const available = (status.devices || []).filter(d => d.id !== this.deviceId && d.session);
+    for (const [id, peer] of this.peers) {
+      if (!available.some(d => d.id === id && d.session === peer.session) || ['failed', 'closed'].includes(peer.pc.connectionState) || (peer.pc.connectionState !== 'connected' && Date.now() - peer.started > 20_000)) {
+        peer.pc.close(); this.peers.delete(id);
+      }
+    }
+    const work: Promise<unknown>[] = [];
+    for (const signal of status.signals || []) {
+      const device = available.find(d => d.id === signal.from && d.session === signal.session);
+      if (!device) continue;
+      work.push((async () => {
+        let peer = this.peers.get(device.id);
+        if (signal.description.type === 'offer') {
+          if (device.id > this.deviceId) return;
+          if (peer) peer.pc.close(); peer = this.peer(device);
+          await peer.pc.setRemoteDescription(signal.description);
+          await this.description(device.id, peer, false);
+        } else if (peer?.pc.signalingState === 'have-local-offer') await peer.pc.setRemoteDescription(signal.description);
+      })());
+    }
+    for (const device of available) {
+      if (this.deviceId < device.id && !this.peers.has(device.id)) {
+        const peer = this.peer(device); this.connectChannel(peer, device.id, peer.pc.createDataChannel('meshrooms-browser-v1'));
+        work.push(this.description(device.id, peer, true));
+      }
+    }
+    const results = await Promise.allSettled(work);
+    for (const result of results) if (result.status === 'rejected' && !this.stopped) this.error('Peer connection interrupted. Reconnecting automatically.');
+    this.flush(); this.notify();
+  }
+  private disconnect() { for (const peer of this.peers.values()) peer.pc.close(); this.peers.clear(); }
+  stop() { this.stopped = true; this.disconnect(); }
+}

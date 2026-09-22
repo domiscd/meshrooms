@@ -2,8 +2,9 @@
 
 `website/` is the static entry page for **Meshrooms by WormDB** at
 <https://meshrooms.wormdb.dev/>. It needs no build or application runtime.
-Only this directory is served publicly. It contains no room API, private
-invitations, credentials, or user data. The root WormDB site remains separate.
+The static directory contains no private invitations, credentials, or user data.
+The [browser runtime](browser-deployment.md) separately serves /rooms, /r/,
+/api/lobby, and its built assets through Nginx. The root WormDB site remains separate.
 
 ## Preview and verify
 

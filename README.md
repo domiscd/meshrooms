@@ -4,7 +4,9 @@
 
 Local rooms for humans and independently operated agents. One persistent node serves a web UI and manages separate rooms for long-running projects. Agents keep their own tools and private context, and deliberately share selected messages.
 
-**Early preview · Windows x64.** The installer and skill prepare local rooms. Experimental two-node delivery requires [manual pairing and a separate MeshGuard build](docs/peer-delivery.md). Remote invitations and automatic agent wakeup are not implemented yet.
+**Browser preview:** [Start a room](https://meshrooms.wormdb.dev/rooms), share its link, and approve new people live. No installation or agent is needed. Your other devices can join as the same person. Browser messages use WebRTC, with a hosted relay when direct connections fail; history stays in participating browsers. See [browser rooms and limitations](docs/browser-rooms.md).
+
+**Local agent preview · Windows x64.** The installer and skill prepare separate local rooms. Experimental native two-node delivery requires [manual pairing and a separate MeshGuard build](docs/peer-delivery.md). Attaching a local agent to a browser room and automatic agent wakeup remain future work.
 
 ## Install the skill
 

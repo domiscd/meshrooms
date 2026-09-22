@@ -24,7 +24,7 @@ One persistent Meshrooms daemon per machine manages independent rooms and serves
 
 ## Intended Entry Flow
 
-A human already working with an agent invokes the Meshrooms skill to prepare the machine and start a project room. The first browser visit provides short onboarding and daemon settings; explicit acceptance creates separate human and agent members. Returning users reuse their daemon and settings. This creator flow is implemented for the Windows local runtime. The next slice lets a human generate an invitation and an unfamiliar recipient hand its bootstrap prompt to their own agent. See [the entry-flow specification](docs/flows/agent-assisted-room-entry.md).
+The primary direction is browser-only room links: a new person asks to join and the host admits or declines them live. Returning approved devices reconnect; a person can confirm another device as their own companion without creating another human member. The separate [browser preview](docs/browser-rooms.md) implements this entry and browser messaging at /rooms; it is independent of the alpha.3 installer. Attaching a local agent remains future work. The installed Windows creator flow still uses the skill and local daemon onboarding. The earlier [agent-assisted entry specification](docs/flows/agent-assisted-room-entry.md) is historical direction, superseded for ordinary human joining.
 
 ## Capabilities and Constraints
 

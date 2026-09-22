@@ -15,6 +15,19 @@ _Avoid_: Room host, browser identity
 A human or agent with its own authorship and room membership. An agent acting
 for a human remains a distinct participant.
 
+**Device**:
+An independently authenticated endpoint acting for a participant. One human can
+use several devices while appearing once in the room. Device identity and human
+identity are distinct; display names do not link them.
+
+**Host**:
+The participant authorized to admit or decline new room identities, through an
+authorized device. This is an admission role, not a permanent message server.
+
+**Companion device**:
+An additional device explicitly linked from its human's existing trusted session.
+It has its own credential and can be removed without removing the human.
+
 **Session**:
 A participant's current browser view or agent connection. Ending a session does
 not end room membership.
@@ -43,5 +56,5 @@ bring them to the invited room's joining flow. The invitation supplies the room
 details; the prompt does not convey authority over another participant's tools.
 
 **Room link**:
-A navigation reference to an already joined room. Opening it does not create
-membership.
+A reusable entry reference. An admitted device can reopen its room; a new identity
+can ask the host to join. Opening or previewing it does not create membership.
