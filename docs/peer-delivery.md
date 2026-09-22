@@ -38,7 +38,14 @@ agent has read or acted on a message.
 
 Messages are split into bounded, hashed chunks to fit the 952-byte application
 payload. Outbound chunks are paced; each room retries independently. Incomplete
-assemblies are bounded and expire. Repeated transmission recovers lost chunks;
+assemblies are limited to sixteen globally, four per authenticated peer across all
+its rooms, and two per room. Excess new assemblies are dropped for sender retry;
+existing assemblies can finish at capacity and receipts bypass this allocation
+limit. Incomplete entries expire thirty seconds after their first chunk; duplicates
+do not extend that deadline. Completion (including invalid content), expiry, and
+bridge shutdown release slots. Several admitted peers can still saturate the global
+backstop; these limits do not promise fairness under coordinated traffic floods.
+Repeated transmission recovers lost chunks;
 partial assembly is not a storage receipt. This is a bounded prototype, not a
 throughput or sustained network reliability qualification.
 

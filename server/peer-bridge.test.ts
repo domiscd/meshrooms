@@ -154,3 +154,89 @@ test('maximum-size unicode text and excerpt are paced below the native queue bou
   expect(f.b.snapshot().rooms[0].messages[0].text).toBe(text);
   expect(f.a.pendingDelivery()[0].messages).toHaveLength(0);
 });
+
+function pairedRoom(a: LocalNode, b: LocalNode, keyA: string, keyB: string) {
+  const room = randomUUID();
+  for (const n of [a, b]) if (!n.settings.completed) n.completeSetup({ requestId: randomUUID(), humanName: 'Peer owner', machineName: 'Peer node', startAtLogin: false });
+  a.createRoom({ title: 'Quota test', requestId: room }); b.createRoom({ title: 'Quota test', requestId: room });
+  a.pairRoom(b.descriptor(room, keyB), keyA); b.pairRoom(a.descriptor(room, keyA), keyB);
+  return room;
+}
+function fragmented(a: LocalNode, room: string) {
+  const sent = a.send({ roomId: room, requestId: randomUUID(), text: 'Fragmented '.repeat(100) });
+  return packets(room, a.pendingDelivery().find(r => r.roomId === room)!.messages.find(m => m.id === sent.messageId)!);
+}
+const chunk = (sender: string, data: string): IncomingPacket => ({ sender, data });
+
+test('peer quota blocks rotating message IDs and hashes while another room receives and acknowledges', async () => {
+  const f = fixture(), c = node(), keyC = 'c'.repeat(64), roomC = pairedRoom(c, f.b, keyC, f.keyB);
+  const first = JSON.parse(fragmented(f.a, f.room)[0]);
+  for (let i = 0; i < 16; i++) await f.bridgeB.ingest(chunk(f.keyA, JSON.stringify({ ...first, id: randomUUID(), hash: i.toString(16).padStart(64, '0') })), 1);
+  const frames = fragmented(c, roomC);
+  for (const data of [...frames].reverse()) await f.bridgeB.ingest(chunk(keyC, data), 2);
+  expect(f.b.snapshot().rooms.find(r => r.id === roomC)!.messages).toHaveLength(1);
+  expect(f.inboxA.map(p => JSON.parse(p.data))).toContainEqual(expect.objectContaining({ k: 'ack', room: roomC }));
+});
+
+test('peer aggregate quota spans rooms and existing assemblies complete at their room cap', async () => {
+  const f = fixture(), room2 = pairedRoom(f.a, f.b, f.keyA, f.keyB), room3 = pairedRoom(f.a, f.b, f.keyA, f.keyB);
+  const groups = [fragmented(f.a, f.room), fragmented(f.a, f.room), fragmented(f.a, room2), fragmented(f.a, room2)];
+  for (const frames of groups) await f.bridgeB.ingest(chunk(f.keyA, frames[0]), 1);
+  const excess = fragmented(f.a, room3);
+  for (const data of excess) await f.bridgeB.ingest(chunk(f.keyA, data), 2);
+  expect(f.b.snapshot().rooms.find(r => r.id === room3)!.messages).toHaveLength(0);
+  await f.bridgeB.ingest(chunk(f.keyA, groups[0][0]), 3); // Duplicate does not allocate another slot.
+  for (const data of groups[0].slice(1).reverse()) await f.bridgeB.ingest(chunk(f.keyA, data), 3);
+  expect(f.b.snapshot().rooms.find(r => r.id === f.room)!.messages).toHaveLength(1);
+  for (const data of excess) await f.bridgeB.ingest(chunk(f.keyA, data), 4);
+  expect(f.b.snapshot().rooms.find(r => r.id === room3)!.messages).toHaveLength(1);
+});
+
+test('room assembly slots expire at their original deadline despite duplicate chunks, and retries recover', async () => {
+  const f = fixture(), held = [fragmented(f.a, f.room), fragmented(f.a, f.room)], retry = fragmented(f.a, f.room);
+  for (const frames of held) await f.bridgeB.ingest(chunk(f.keyA, frames[0]), 100);
+  for (const data of retry) await f.bridgeB.ingest(chunk(f.keyA, data), 101);
+  expect(f.b.snapshot().rooms[0].messages).toHaveLength(0);
+  for (const frames of held) await f.bridgeB.ingest(chunk(f.keyA, frames[0]), 30099);
+  for (const data of retry) await f.bridgeB.ingest(chunk(f.keyA, data), 30100);
+  expect(f.b.snapshot().rooms[0].messages).toHaveLength(1);
+  expect(f.inboxA).toHaveLength(1);
+});
+
+test('malformed or unpaired chunks allocate no slots; invalid completion releases its room slot', async () => {
+  const f = fixture(), frames = fragmented(f.a, f.room), first = JSON.parse(frames[0]);
+  for (let i = 0; i < 16; i++) {
+    await f.bridgeB.ingest(chunk('c'.repeat(64), JSON.stringify({ ...first, id: randomUUID() })), 1);
+    await f.bridgeB.ingest(chunk(f.keyA, JSON.stringify({ ...first, room: randomUUID(), id: randomUUID() })), 1);
+    await f.bridgeB.ingest(chunk(f.keyA, JSON.stringify({ ...first, n: 129, id: randomUUID() })), 1);
+  }
+  const invalid = frames.map(data => JSON.stringify({ ...JSON.parse(data), hash: 'f'.repeat(64) }));
+  await f.bridgeB.ingest(chunk(f.keyA, frames[0]), 2);
+  await f.bridgeB.ingest(chunk(f.keyA, invalid[0]), 2);
+  for (const data of invalid.slice(1)) await f.bridgeB.ingest(chunk(f.keyA, data), 3);
+  const next = fragmented(f.a, f.room);
+  for (const data of next) await f.bridgeB.ingest(chunk(f.keyA, data), 4);
+  for (const data of frames.slice(1)) await f.bridgeB.ingest(chunk(f.keyA, data), 5);
+  expect(f.b.snapshot().rooms[0].messages).toHaveLength(2); expect(f.inboxA).toHaveLength(2);
+});
+
+test('assembly global backstop remains bounded and acknowledgments bypass a full inbound room quota', async () => {
+  const f = fixture(), sources = [{ source: f.a, key: f.keyA, room: f.room }];
+  for (let i = 1; i < 9; i++) {
+    const source = node(), key = (i + 2).toString(16).repeat(64);
+    sources.push({ source, key, room: pairedRoom(source, f.b, key, f.keyB) });
+  }
+  for (const { source, key, room } of sources.slice(0, 8)) {
+    for (let i = 0; i < 2; i++) await f.bridgeB.ingest(chunk(key, fragmented(source, room)[0]), 1);
+  }
+  const last = sources[8], frames = fragmented(last.source, last.room);
+  for (const data of frames) await f.bridgeB.ingest(chunk(last.key, data), 2);
+  expect(f.b.snapshot().rooms.find(r => r.id === last.room)!.messages).toHaveLength(0);
+  const sent = f.b.send({ roomId: f.room, requestId: randomUUID(), text: 'Outbound delivery at inbound cap' });
+  const message = f.b.pendingDelivery().find(r => r.roomId === f.room)!.messages[0];
+  const hash = f.a.receivePeer(f.room, f.keyB, message);
+  await f.bridgeB.ingest(chunk(f.keyA, JSON.stringify({ v: 1, k: 'ack', room: f.room, id: sent.messageId, hash })), 3);
+  expect(f.b.pendingDelivery().find(r => r.roomId === f.room)!.acknowledged).toContain(sent.messageId);
+  for (const data of frames) await f.bridgeB.ingest(chunk(last.key, data), 30001);
+  expect(f.b.snapshot().rooms.find(r => r.id === last.room)!.messages).toHaveLength(1);
+});

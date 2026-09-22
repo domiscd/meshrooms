@@ -153,7 +153,12 @@ private workspace files. Local room links point back to the same machine.
 
 The initial store supports 64 rooms, 1,000 messages and 8 MiB of encoded history
 per room, 64 retained agent room intents, 256 retained setup receipts, and 16 active
-SSE views. Pending requests count against room capacity. History is bounded but still rewritten as a
+SSE views. Agents are limited to two views per authenticated participant and four
+per room, with at most twelve agent views overall so four slots remain available
+to the owner. Owner cookies and the control bearer share the same identity;
+duplicate active view IDs for that identity return 429. Abort or cancellation
+releases the slot, and reconnecting after cleanup remains supported.
+Pending requests count against room capacity. History is bounded but still rewritten as a
 room record, and views receive full snapshots. Room append logs, pagination,
 incremental resumable streams, and durable read markers remain follow-up work
 before heavy long-term traffic. Node disk/process failure remains shared across
