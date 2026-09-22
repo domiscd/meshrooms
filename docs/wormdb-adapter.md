@@ -26,15 +26,15 @@ a 64-bit runtime. Close is idempotent; access after close throws.
 ## Native dependency availability
 
 The Windows release archive includes a compatible WormDB DLL under its own
-[MIT license](../LICENSES/wormdb.txt). WormDB is intended to become open source;
-its source repository remains private while that release is prepared. No private
-source or patches are included here. Do not substitute an asynchronous-only build:
+[MIT license](../LICENSES/wormdb.txt). Its [source is public](https://github.com/igorls/wormdb),
+and the current native pin includes both the synchronous API and security fixes.
+Older archives retain their own native artifacts. Do not substitute an asynchronous-only build:
 its acknowledgement would violate Meshrooms' local-save contract.
 
-For an authorized local build, place the compatible Windows x64 library at
+For a qualified local build, place the compatible Windows x64 library at
 `.local/native/wormdb_ffi.dll`, or set `WORMDB_LIBRARY_PATH`. That directory is
 ignored by Git. Developers can extract the DLL from the versioned Windows release
-archive after verifying its checksum. Maintainers with source access can use the
+archive after verifying its checksum. Source builders can use the
 [native build procedure](native-build.md). Other platforms require their own builds
 and qualification.
 

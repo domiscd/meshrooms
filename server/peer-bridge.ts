@@ -4,8 +4,9 @@ import { isHash, isUuid, type StoredMessage } from './model';
 import type { IncomingPacket, PeerTransport } from './meshguard';
 
 const CHUNK_BYTES = 512, MAX_CHUNKS = 128, MAX_ASSEMBLIES = 16;
+const MAX_PEER_ASSEMBLIES = 4, MAX_ROOM_ASSEMBLIES = 2;
 const digest = (data: Uint8Array) => createHash('sha256').update(data).digest('hex');
-type Assembly = { room: string; id: string; hash: string; count: number; chunks: Map<number, Buffer>; expires: number };
+type Assembly = { sender: string; room: string; id: string; hash: string; count: number; chunks: Map<number, Buffer>; expires: number };
 function canonical(message: StoredMessage): StoredMessage {
   return { id: message.id, authorId: message.authorId, author: message.author, role: message.role, text: message.text,
     time: message.time, share: message.share, replyTo: message.replyTo, requestId: message.requestId, fingerprint: message.fingerprint };
@@ -40,7 +41,7 @@ export class PeerBridge {
     try {
       await this.transport.check(); if (this.closed) return;
       this.connected = true; this.lastError = undefined;
-      for (const [key, value] of this.assemblies) if (value.expires < now) this.assemblies.delete(key);
+      this.expireAssemblies(now);
       for (let i = 0; i < 32 && !this.closed; i++) {
         const incoming = await this.transport.receive(); if (!incoming || this.closed) break;
         try { await this.ingest(incoming, now); }
@@ -67,6 +68,9 @@ export class PeerBridge {
     } catch (error) { this.connected = false; this.lastError = error instanceof Error ? error.message : 'MeshGuard attachment failed.'; }
     finally { this.busy = false; }
   }
+  private expireAssemblies(now: number) {
+    for (const [key, value] of this.assemblies) if (value.expires <= now) this.assemblies.delete(key);
+  }
   async ingest(incoming: IncomingPacket, now = Date.now()) {
     if (this.closed || Buffer.byteLength(incoming.data) > 1024) return;
     const p = JSON.parse(incoming.data);
@@ -76,11 +80,17 @@ export class PeerBridge {
       || typeof p.data !== 'string' || p.data.length > 684 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(p.data)) return;
     const chunk = Buffer.from(p.data, 'base64');
     if (!chunk.length || chunk.length > CHUNK_BYTES || (p.i < p.n - 1 && chunk.length !== CHUNK_BYTES)) return;
+    this.expireAssemblies(now);
     const key = `${incoming.sender}:${p.room}:${p.id}:${p.hash}`;
     let assembly = this.assemblies.get(key);
     if (!assembly) {
       if (this.assemblies.size >= MAX_ASSEMBLIES) return;
-      assembly = { room: p.room, id: p.id, hash: p.hash, count: p.n, chunks: new Map(), expires: now + 30000 }; this.assemblies.set(key, assembly);
+      // Count the bounded map itself so completion, expiry and close cannot
+      // leave stale quota counters. A peer's allowance spans all paired rooms.
+      const held = [...this.assemblies.values()];
+      if (held.filter(a => a.sender === incoming.sender).length >= MAX_PEER_ASSEMBLIES
+        || held.filter(a => a.room === p.room).length >= MAX_ROOM_ASSEMBLIES) return;
+      assembly = { sender: incoming.sender, room: p.room, id: p.id, hash: p.hash, count: p.n, chunks: new Map(), expires: now + 30000 }; this.assemblies.set(key, assembly);
     }
     if (assembly.count !== p.n) return;
     assembly.chunks.set(p.i, chunk);

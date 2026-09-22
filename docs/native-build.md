@@ -1,14 +1,16 @@
 # Native Windows build
 
-The release includes an MIT-licensed WormDB DLL. WormDB will become open source;
-its source remains private while that release is prepared. This public repository
-contains the input pins and build procedure, without private source or patches.
+Meshrooms uses the MIT-licensed [WormDB source](https://github.com/igorls/wormdb)
+and pins its native build inputs in this repository. The current source pin
+combines the synchronous embedding API and priority security fixes. Published
+older app archives retain their own native pins; a source merge is not a release.
 
-Maintainers with access to a clean private checkout can run:
+With a clean checkout at the lockfile's `candidateCommit` and its initialized
+`deps/meshguard` submodule, run:
 
 ```powershell
-./scripts/build-native.ps1 -SourceDir <private-checkout> -OutDir <fresh-output-directory>
-./scripts/build-native.ps1 -VerifyOnly
+./scripts/build-native.ps1 -SourceDir <wormdb-checkout> -OutDir <fresh-output-directory>
+./scripts/build-native.ps1 -VerifyOnly -OutDir <qualified-output-directory>
 ```
 
 The first command requires Windows x64 and Zig 0.16.0. It checks both source
@@ -19,13 +21,15 @@ directory; Zig's shared toolchain cache is reused.
 It refuses an existing output DLL and records the resulting size and SHA-256.
 PE build identifiers can change across build directories, so this is not a
 promise of bit-identical rebuilding. A provenance JSON accompanies
-the candidate output; it contains no machine paths. Scratch input remains private under
-`.local/native-build` and must never be published.
+the candidate output; it contains no machine paths. Scratch input remains ignored
+under `.local/native-build` and is not packaged.
 
 The second command verifies the exact reviewed hash of `.local/native/wormdb_ffi.dll`,
 or a supplied `-OutDir`, without compiling. Packaging requires that exact match.
-Public users can obtain that library from the
-versioned app archive after checking `SHA256SUMS.txt`.
+Use `WORMDB_LIBRARY_PATH` to test a separate candidate without replacing a DLL
+used by an existing daemon. A versioned app archive contains the DLL matching its
+own lockfile, which may differ from current source. Check `SHA256SUMS.txt` before
+using that archive.
 
 The pinned Windows build selects Zig `std.crypto` and does not link libsodium.
 Inspection with `llvm-readobj --coff-imports` found KERNEL32, ntdll, and the Windows

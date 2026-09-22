@@ -14,7 +14,7 @@ The root MIT license covers Meshrooms source and its agent skill. Dependencies r
 | MinGW runtime support shipped with Zig | Zig 0.16.0 distribution | [Component notices](LICENSES/mingw.txt) |
 | Bun, fetched separately by the installer | 1.4.2 | [Upstream notices](LICENSES/bun.txt), including linked libraries |
 
-WormDB is intended to become open source. Its source repository remains private while that release is prepared. Its author grants the accompanying MIT license for the WormDB binary distributed in this preview. This repository and its archives contain no private WormDB source or patches.
+WormDB [source](https://github.com/igorls/wormdb) and its distributed native library are MIT licensed. The native lockfile records the exact source and dependency inputs for this revision; retain the accompanying license when distributing the binary.
 
 The public app archive does not redistribute Bun. The installer downloads the pinned executable archive directly from [Bun's upstream release](https://github.com/oven-sh/bun/releases/tag/bun-v1.4.2) and verifies its SHA-256. Bun's [source and build instructions](https://github.com/oven-sh/bun/tree/bun-v1.4.2) and retained upstream notice describe its linked dependencies and relinking procedure.
 

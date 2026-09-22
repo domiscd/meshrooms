@@ -94,6 +94,44 @@ test('real HTTP setup requires acceptance, enforces identity/scope, and exposes 
   } finally { daemon.close(); directory.cleanup(); }
 });
 
+test('real daemon isolates SSE capacity and reclaims an aborted network stream', async () => {
+  const directory = testDirectory('view-quotas');
+  const daemon = startDaemon({ ...defaultOptions(), dataDir: directory.path, port: 0, startup: testStartupManager() });
+  const control = readFileSync(join(directory.path, 'control.key'), 'utf8').trim();
+  const streams: { abort: AbortController; response: Response }[] = [];
+  const agent = () => {
+    const token = randomBytes(32).toString('base64url'), room = randomUUID();
+    daemon.node.prepareRoom({ requestId: room, title: 'Network quota', agentName: 'Worker', credentialHash: tokenHash(token) });
+    daemon.node.completeSetup({ requestId: randomUUID(), intentId: room, humanName: 'Owner', machineName: 'Test', startAtLogin: false });
+    return token;
+  };
+  const open = async (token: string, view: string) => {
+    const abort = new AbortController();
+    const response = await fetch(`http://127.0.0.1:${daemon.server.port}/api/node/events?view=${view}`, {
+      headers: { Authorization: `Bearer ${token}` }, signal: abort.signal });
+    const stream = { abort, response }; streams.push(stream); return stream;
+  };
+  try {
+    const a = agent(), b = agent();
+    const first = await open(a, 'first'); expect(first.response.status).toBe(200);
+    expect((await open(a, 'second')).response.status).toBe(200);
+    for (let i = 0; i < 16; i++) expect((await open(a, `rotating-${i}`)).response.status).toBe(429);
+    expect((await open(b, 'first')).response.status).toBe(200);
+    expect((await open(control, 'first')).response.status).toBe(200);
+    first.abort.abort(); await first.response.body?.cancel().catch(() => {});
+    let status = 429;
+    for (let i = 0; i < 50 && status === 429; i++) {
+      status = (await open(a, 'first')).response.status;
+      if (status === 429) await Bun.sleep(10);
+    }
+    expect(status).toBe(200);
+    expect((await open(a, 'still-full')).response.status).toBe(429);
+  } finally {
+    for (const { abort, response } of streams) { abort.abort(); await response.body?.cancel().catch(() => {}); }
+    daemon.close(); directory.cleanup();
+  }
+});
+
 test('CLI start/retry and simultaneous ensure reuse the actual daemon; agent CLI uses only the admitted room', async () => {
   const directory = testDirectory('first-run-cli');
   const options = { ...defaultOptions(), dataDir: directory.path, port: 0 };

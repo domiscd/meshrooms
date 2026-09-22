@@ -9,23 +9,41 @@ type HttpOptions = { node: LocalNode; origins: string[]; distDir: string; dataDi
   startup: StartupManager; runtime: { apiVersion: number; instanceId: string; pid: number }; proof: (challenge: string) => string;
   bridge?: PeerBridge; localPeerKey?: string };
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+const MAX_VIEWS = 16, OWNER_RESERVED_VIEWS = 4, MAX_AGENT_VIEWS = 2, MAX_ROOM_VIEWS = 4;
 
 export function createHandler({ node, origins, distDir, dataDir, access, startup, runtime, proof, bridge, localPeerKey }: HttpOptions) {
   const allowedOrigins = new Set(origins);
   const allowedHosts = new Set(origins.map(origin => new URL(origin).host));
-  let views = 0;
+  const views = new Map<string, Principal>();
   function events(request: Request, principal: Principal): Response {
     const view = new URL(request.url).searchParams.get('view') || '';
     if (!/^[\w-]{1,64}$/.test(view)) throw new NodeError(400, 'A valid view ID is required.');
-    if (views >= 16) throw new NodeError(429, 'Too many active local views. Close an unused view and retry.');
+    const key = `${principal.kind}:${principal.participantId}:${view}`;
+    if (views.has(key)) throw new NodeError(429, 'This view is already connected. Close it before reconnecting.');
+    if (views.size >= MAX_VIEWS) throw new NodeError(429, 'Too many active local views. Close an unused view and retry.');
+    if (principal.kind === 'agent') {
+      const agents = [...views.values()].filter(p => p.kind === 'agent');
+      if (agents.length >= MAX_VIEWS - OWNER_RESERVED_VIEWS
+        || agents.filter(p => p.participantId === principal.participantId).length >= MAX_AGENT_VIEWS
+        || agents.filter(p => p.roomId === principal.roomId).length >= MAX_ROOM_VIEWS) {
+        throw new NodeError(429, 'Too many active agent views. Close an unused view and retry.');
+      }
+    }
     let cleanup = () => {};
     let publish = () => {};
     let dirty = true;
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        views++;
-        const disconnect = node.connect(principal);
+        views.set(key, principal);
         let closed = false;
+        let disconnect = () => {}, unsubscribe = () => {};
+        let heartbeat: ReturnType<typeof setInterval> | undefined;
+        cleanup = () => {
+          if (closed) return;
+          closed = true; views.delete(key); unsubscribe(); disconnect(); clearInterval(heartbeat);
+          request.signal.removeEventListener('abort', cleanup);
+          try { controller.close(); } catch { /* Already cancelled by the client. */ }
+        };
         const encoder = new TextEncoder();
         const push = () => {
           if (closed || !dirty || (controller.desiredSize ?? 0) <= 0) return;
@@ -33,20 +51,17 @@ export function createHandler({ node, origins, distDir, dataDir, access, startup
           try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(node.snapshot(principal))}\n\n`)); }
           catch { cleanup(); }
         };
-        const unsubscribe = node.subscribe(() => { dirty = true; push(); });
-        const heartbeat = setInterval(() => {
-          if (closed || (controller.desiredSize ?? 0) <= 0) return;
-          try { controller.enqueue(encoder.encode(': local daemon heartbeat\n\n')); } catch { cleanup(); }
-        }, 15000);
-        cleanup = () => {
-          if (closed) return;
-          closed = true; views--; unsubscribe(); disconnect(); clearInterval(heartbeat);
-          request.signal.removeEventListener('abort', cleanup);
-          try { controller.close(); } catch { /* Already cancelled by the client. */ }
-        };
-        request.signal.addEventListener('abort', cleanup, { once: true });
-        publish = push;
-        if (request.signal.aborted) cleanup(); else push();
+        try {
+          disconnect = node.connect(principal);
+          unsubscribe = node.subscribe(() => { dirty = true; push(); });
+          heartbeat = setInterval(() => {
+            if (closed || (controller.desiredSize ?? 0) <= 0) return;
+            try { controller.enqueue(encoder.encode(': local daemon heartbeat\n\n')); } catch { cleanup(); }
+          }, 15000);
+          request.signal.addEventListener('abort', cleanup, { once: true });
+          publish = push;
+          if (request.signal.aborted) cleanup(); else push();
+        } catch (error) { cleanup(); throw error; }
       },
       pull() { publish(); },
       cancel() { cleanup(); },

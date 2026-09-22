@@ -14,7 +14,7 @@ function Verify-Library([string]$Path) {
 if ($VerifyOnly) { Verify-Library $dll; Write-Output 'Native library matches the reviewed lockfile.'; return }
 if ([Environment]::OSVersion.Platform -ne 'Win32NT' -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'Build on Windows x64.' }
 if (-not $SourceDir) { $SourceDir = $env:WORMDB_SRC }
-if (-not $SourceDir) { throw 'Pass -SourceDir with an authorized private WormDB checkout.' }
+if (-not $SourceDir) { throw 'Pass -SourceDir with a clean WormDB checkout at the locked candidate commit.' }
 $source = (Resolve-Path -LiteralPath $SourceDir).Path
 function Verify-Source([string]$Path, [string]$Commit) {
     $head = git -C $Path rev-parse HEAD
@@ -55,6 +55,6 @@ $builtHash = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash.ToLowerIn
 $builtSize = (Get-Item -LiteralPath $built).Length
 [IO.Directory]::CreateDirectory($output) | Out-Null
 [IO.File]::Copy($built, $dll, $false)
-$provenance = @{ schema = 1; sourceCommit = $lock.candidateCommit; meshguardCommit = $lock.meshguardCommit; zigVersion = $zigVersion; sha256 = $builtHash; size = $builtSize; builtAt = [DateTime]::UtcNow.ToString('o'); sourceMode = 'private tracked snapshot'; sourcePinsVerified = $true; matchesReviewedArtifact = ($builtHash -ceq $lock.artifact.sha256) }
+$provenance = @{ schema = 1; sourceCommit = $lock.candidateCommit; meshguardCommit = $lock.meshguardCommit; zigVersion = $zigVersion; sha256 = $builtHash; size = $builtSize; builtAt = [DateTime]::UtcNow.ToString('o'); sourceMode = 'public tracked snapshot'; sourcePinsVerified = $true; matchesReviewedArtifact = ($builtHash -ceq $lock.artifact.sha256) }
 [IO.File]::WriteAllText((Join-Path $output 'wormdb.provenance.json'), ($provenance | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 Write-Output "Native candidate built from verified source pins: $dll ($builtHash). Run integration tests and review before updating the release artifact pin."

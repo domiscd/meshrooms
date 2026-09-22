@@ -2,8 +2,8 @@
   "schema": 1,
   "dependency": "wormdb",
   "repository": "https://github.com/igorls/wormdb.git",
-  "baseCommit": "47d8f15657aa55984f7b90aabbe15a9d2b394aef",
-  "candidateCommit": "08124f6b960e1e6e8bc5d605dc5284e4795206f3",
+  "baseCommit": "14af562e16fd8462f14776763c5ea4c00fc32116",
+  "candidateCommit": "630f39495afeb2c500eb2dd7c799f7807f9b75a0",
   "meshguardCommit": "fdbfd51bdbc643bae0aff8cb7b11e9372f6a23a8",
   "toolchain": {
     "compiler": "zig",
@@ -16,8 +16,8 @@
     "name": "wormdb_ffi.dll",
     "platform": "win32",
     "arch": "x64",
-    "size": 1954304,
-    "sha256": "80789092f71c1839e91385d9d795f5ceb1828edc544c0f26d2b23a19896733de",
+    "size": 1953792,
+    "sha256": "72be67a557818090048c669536c464a5bea1171ba79777eba3a08572d1f88aac",
     "requiredSymbols": [
       "wormdb_open",
       "wormdb_open_sync",
@@ -29,9 +29,9 @@
     ]
   },
   "upstreamStatus": {
-    "visibility": "private",
-    "license": "MIT (prebuilt binary distribution authorized by author; source remains private)",
-    "syncBranchPublished": false,
-    "notes": "Upstream repo igorls/wormdb is private. Candidate commit 08124f6b960e1e6e8bc5d605dc5284e4795206f3 adds wormdb_open_sync and immediate WAL fsync in direct writes."
+    "visibility": "public",
+    "license": "MIT",
+    "syncBranchPublished": true,
+    "notes": "Integrated source includes the priority security fixes, wormdb_open_sync and immediate WAL fsync in direct writes. The native artifact is qualified separately from the standalone network server."
   }
 }

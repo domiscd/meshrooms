@@ -1,6 +1,6 @@
 # Releasing
 
-Meshrooms source and skill are public. Windows binaries are prepared locally from reviewed Meshrooms source and an authorized private WormDB checkout. Do not publish that checkout, private patches, credentials, room data, or local development history.
+Meshrooms source and skill are public. Windows binaries are prepared locally from reviewed Meshrooms source and a clean public WormDB checkout at the locked commit. Do not publish untracked files, credentials, room data, or unrelated local development history.
 
 1. Update the package version, skill installer default, changelog, and matching release notes. Keep the Bun version and upstream archive checksum in agreement.
 2. Build or verify the native input using [the native build procedure](native-build.md). Retain its license and dependency notices.
