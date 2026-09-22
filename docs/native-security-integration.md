@@ -5,13 +5,15 @@ not a deployment or a published application release.
 
 ## Pinned inputs and artifact
 
-- WormDB source: `630f39495afeb2c500eb2dd7c799f7807f9b75a0`.
+- WormDB source: `e63d56018118433f8fd7008080fd41a2c10470ef`.
 - Includes priority security commit `6a53cd0`, synchronous FFI branch `08124f6`,
-  and explicit failure cleanup in the new nullable opener.
+  explicit failure cleanup in the new nullable opener, token-expiry event
+  revocation with exact binary-channel authorization, and synchronous WAL
+  error fencing until reopen/recovery.
 - MeshGuard source: `fdbfd51bdbc643bae0aff8cb7b11e9372f6a23a8`.
 - Windows x64, Zig 0.16.0, `zig build ffi -Doptimize=ReleaseFast`.
-- DLL size: 1,953,792 bytes.
-- SHA-256: `72be67a557818090048c669536c464a5bea1171ba79777eba3a08572d1f88aac`.
+- DLL size: 1,953,280 bytes.
+- SHA-256: `d68be2562acdc1a546772a140652a31beaf9ae4bf69d3debca0612a73d568ac5`.
 
 The existing build script exported clean, exact tracked source and dependency
 pins into a fresh ignored scratch directory. The resulting DLL and provenance
@@ -43,20 +45,25 @@ immediate process termination and recovery, write-failure propagation, corrupted
 WAL rejection, agent admission/isolation and stream quota recovery, and peer
 assembly fairness. The incompatible-symbol rejection test was enabled.
 
-The combined WormDB source passed 303/303 Zig tests, 8/8 build steps and 14/14
+The combined WormDB source passed 304/304 Zig tests, 8/8 build steps and 17/17
 live security regression groups on both Windows and Ubuntu WSL. These network
 checks exercise the standalone server separately; the Meshrooms DLL embeds the
 local storage engine and starts no WormDB network listener.
 
-One independent read-only integration review found no concrete bypass or
-regression. It independently repeated 303 Zig tests, 44 consumer/native tests,
-the real-daemon quota test, exact native verification and both diff checks.
+The initial independent integration review repeated 303 Zig tests, 44
+consumer/native tests and the real-daemon quota test. Hosted review then found
+the idle-expiry and WAL uncertainty issues, and a follow-up reviewer reproduced
+the binary-channel authorization bypass. Those findings were corrected before
+this final artifact was built; the engine validation above covers the added
+regressions. Exact native verification, required-export inspection and both diff
+checks passed for the final candidate.
 
 ## Boundaries
 
 The new synchronous opener keeps the WAL writer inline and returns success only
-after write and sync. Errors propagate; failed operations are not promised to
-roll back partially written bytes. Unsafe in-memory procedures remain outside
+after write and sync. Errors propagate; a direct WAL I/O error blocks later
+WAL-backed writes until reopen/recovery, and failed operations are not promised
+to roll back partially written bytes. Unsafe in-memory procedures remain outside
 the durable-write guarantee. Automatic WAL truncation remains disabled for
 `sync_writes`; long-term storage growth is unchanged and still requires work.
 
