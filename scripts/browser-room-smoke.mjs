@@ -1,6 +1,6 @@
 // Run against an isolated local browser coordinator, with Playwright installed.
 import { createRequire } from 'node:module';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import assert from 'node:assert/strict';
 const require = createRequire(import.meta.url);
@@ -15,6 +15,13 @@ async function page(viewport = { width: 1365, height: 900 }) {
   const context = await browser.newContext({ viewport }); contexts.push(context);
   await context.addInitScript(({ relay, transport }) => {
     window.__testPeers = [];
+    window.__testEpochs = [];
+    const originalFetch = window.fetch;
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      if (String(args[0]).endsWith('/api/lobby')) void response.clone().json().then(data => { if (data.epoch && !window.__testEpochs.includes(data.epoch)) window.__testEpochs.push(data.epoch); }).catch(() => {});
+      return response;
+    };
     const Original = window.RTCPeerConnection;
     window.RTCPeerConnection = class extends Original {
       constructor(config) {
@@ -49,6 +56,21 @@ try {
   await send(host, first); await visible(guest, first); await visible(host, 'Stored on 1 of 1 devices');
   await send(guest, 'Received. No installation needed.'); await visible(host, 'Received. No installation needed.');
   await visible(guest, 'Stored on 1 of 1 devices');
+  const restartGate = process.env.MESHROOMS_TEST_RESTART_GATE;
+  if (restartGate) {
+    writeFileSync(restartGate, 'ready'); console.log('Ready for coordinator restart.');
+    const deadline = Date.now() + 120_000;
+    while (!existsSync(restartGate) || readFileSync(restartGate, 'utf8').trim() !== 'restarted') {
+      if (Date.now() >= deadline) throw new Error('Coordinator restart was not completed.');
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    await host.waitForFunction(() => window.__testEpochs.length >= 2);
+    await guest.waitForFunction(() => window.__testEpochs.length >= 2);
+    await visible(host, 'Connected to 1 other device'); await visible(guest, 'Connected to 1 other device');
+    await send(host, 'The conversation continues after a coordinator restart.');
+    await visible(guest, 'The conversation continues after a coordinator restart.');
+    assert.equal(await guest.getByText(first, { exact: true }).count(), 1);
+  }
   await guest.reload(); await visible(guest, first); await visible(guest, 'Connected to 1 other device');
   assert.equal(await guest.getByText(first, { exact: true }).count(), 1);
   const duplicate = await guest.context().newPage(); await duplicate.goto(invite);
@@ -171,8 +193,18 @@ try {
   await visitor.setViewportSize({ width: 390, height: 844 }); await snapshot(visitor, 'expired-mobile.png');
   assert.deepEqual(errors, []);
   const result = { passed: true, browser: 'Chromium', scope: 'Isolated browser contexts on one Windows machine', origin, roomId: new URL(invite).pathname.split('/').at(-1), relayTransport: process.env.MESHROOMS_TEST_TURN_TRANSPORT || 'automatic', routes,
-    checks: ['pending admission isolation', 'live host admission', 'bidirectional Unicode messages and storage receipts', 'reload identity/history', 'duplicate tab ownership', 'companion identity and authorship', 'device removal', 'decline', 'cancel', 'mobile and tablet overflow', 'preserved reading position and unread feedback', 'anchored composer', 'room details draft and keyboard focus retention', 'Enter sends and Shift+Enter adds a line', 'live message announcement', 'expired request UI (simulated response)'],
+    checks: ['pending admission isolation', 'live host admission', 'bidirectional Unicode messages and storage receipts', ...(restartGate ? ['live coordinator restart recovery'] : []), 'reload identity/history', 'duplicate tab ownership', 'companion identity and authorship', 'device removal', 'decline', 'cancel', 'mobile and tablet overflow', 'preserved reading position and unread feedback', 'anchored composer', 'room details draft and keyboard focus retention', 'Enter sends and Shift+Enter adds a line', 'live message announcement', 'expired request UI (simulated response)'],
     notQualified: ['real macOS execution', 'different-network NAT traversal', ...(process.env.MESHROOMS_TEST_FORCE_RELAY === '1' ? [] : ['TURN relay']), 'native agent bridge', 'companion history backfill'] };
   writeFileSync(resolve(output, 'browser-smoke.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));
+} catch (error) {
+  // Keep failure diagnostics bounded and exclude SDP, device keys, and credentials.
+  for (const context of contexts) for (const p of context.pages()) {
+    console.error(JSON.stringify(await p.evaluate(() => ({
+      path: location.pathname,
+      feedback: [...document.querySelectorAll('.browser-error,.browser-connection')].map(el => el.textContent),
+      peers: (window.__testPeers || []).map(pc => ({ connection: pc.connectionState, ice: pc.iceConnectionState, gathering: pc.iceGatheringState, signaling: pc.signalingState, relayCandidate: / typ relay/.test(pc.localDescription?.sdp || '') })),
+    })).catch(() => ({ closed: true }))));
+  }
+  throw error;
 } finally { for (const context of contexts) await context.close(); await browser.close(); }
