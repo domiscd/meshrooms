@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
-import { acquireInstance } from './instance';
+import { acquireInstance, InstanceOwnedError } from './instance';
 import { LocalNode } from './node';
 import { createHandler } from './http';
 import { openWormDBStore } from './persistence/wormdb';
@@ -87,10 +87,13 @@ export function startDaemon(options: DaemonOptions) {
 if (import.meta.main) {
   const options = defaultOptions();
   const args = process.argv.slice(2);
+  let supervised = false;
   try {
     for (let i = 0; i < args.length; i++) {
-      const flag = args[i]; const value = args[++i];
-      if (flag === '--help') { console.log('meshrooms: --data-dir PATH --library PATH --port 4318 [--dev-origin http://127.0.0.1:4317]'); process.exit(0); }
+      const flag = args[i];
+      if (flag === '--supervised') { supervised = true; continue; }
+      const value = args[++i];
+      if (flag === '--help') { console.log('meshrooms: --data-dir PATH --library PATH --port 4318 [--dev-origin http://127.0.0.1:4317] [--supervised]'); process.exit(0); }
       if (!value) throw new Error(`Missing value for ${flag}.`);
       if (flag === '--data-dir') options.dataDir = resolve(value);
       else if (flag === '--library') options.libraryPath = resolve(value);
@@ -103,5 +106,9 @@ if (import.meta.main) {
       url: `http://127.0.0.1:${daemon.server.port}/prototype/room`, dataDir: options.dataDir, storage: 'wormdb' }));
     const stop = () => { daemon.close(); process.exit(0); };
     process.once('SIGINT', stop); process.once('SIGTERM', stop);
-  } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    // A service manager restarts failed exits. A node already served by another process needs no retry loop.
+    process.exitCode = supervised && error instanceof InstanceOwnedError ? 0 : 1;
+  }
 }

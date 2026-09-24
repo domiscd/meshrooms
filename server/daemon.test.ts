@@ -69,3 +69,18 @@ test('one actual daemon recovers two rooms, local membership and idempotent send
     expect((await fetch(`${run.base}/api/node/health`)).status).toBe(200);
   } finally { if (run) await terminate(run.child); directory.cleanup(); }
 }, 30000);
+test.skipIf(process.platform === 'win32')('a supervised second daemon exits successfully instead of provoking restart loops', async () => {
+  const directory = testDirectory('supervised'); const dir = directory.path;
+  let run: Awaited<ReturnType<typeof launch>> | undefined;
+  try {
+    run = await launch(dir);
+    const second = (supervised: boolean) => Bun.spawn([process.execPath, join(import.meta.dir, 'daemon.ts'), ...(supervised ? ['--supervised'] : []),
+      '--data-dir', dir, '--library', defaultOptions().libraryPath, '--port', '0'], { stdout: 'pipe', stderr: 'pipe' });
+    const quiet = second(true);
+    expect(await quiet.exited).toBe(0);
+    expect(await new Response(quiet.stderr).text()).toContain('already owns');
+    // Unsupervised launches keep reporting the collision as a failure.
+    expect(await second(false).exited).toBe(1);
+    expect((await fetch(`${run.base}/api/node/health`)).status).toBe(200);
+  } finally { if (run) await terminate(run.child); directory.cleanup(); }
+}, 30000);

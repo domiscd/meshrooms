@@ -5,7 +5,7 @@ stream, built web UI, and embedded WormDB. A browser is a client of that process
 Closing a view leaves the node and its rooms active.
 
 This slice includes first-run onboarding, human/agent identities, room-scoped
-agent API authorization, machine preferences, and Windows start-at-login.
+agent API authorization, machine preferences, and Windows and macOS start-at-login.
 MeshGuard delivery, remote invitations, durable remote outboxes, and system
 service installation remain subsequent work.
 
@@ -63,6 +63,20 @@ option unsupported and requires a daemon restart from a regular Windows terminal
 This is not a system service or proof
 of a future successful login launch; policy, executable availability, and user
 Startup Apps controls can still affect execution. Storage relocation is separate.
+
+On macOS, the same preference writes a per-data-directory LaunchAgent,
+`~/Library/LaunchAgents/dev.wormdb.meshrooms.<hash>.plist`. It runs `daemon.ts`
+in the foreground with `--supervised`, so launchd restarts it after a crash
+(`KeepAlive` on unsuccessful exit) and logs to `<dataDir>/daemon.log`. A
+supervised daemon that finds the node already owned by another process exits
+successfully, so a concurrent `ensure` cannot cause a restart loop. The entry
+takes effect at the next login: enabling does not load it now, because the
+running daemon owns the store, and disabling only removes the file, because
+unloading could stop the daemon answering the request. The API reports it
+installed only when the file matches the expected arguments and launchd has not
+marked the label disabled. System Settings > General > Login Items can attribute
+the entry to the Bun executable rather than Meshrooms; signed attribution
+belongs to the [desktop shell](desktop-shell.md).
 
 Windows uses the shared user-profile root because packaged applications can hide
 AppData and registry writes from other harnesses. The first AppData-based dogfood
