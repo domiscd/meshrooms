@@ -1,6 +1,7 @@
 # Desktop shell
 
-Status: development preview, macOS arm64 first. Unsigned and not notarized.
+Status: development preview, macOS arm64 first. Release builds are signed with
+Developer ID and notarized; local `desktop:build` output is unsigned.
 
 `desktop/` is a small Tauri 2 menu-bar app for the local node. It follows
 [one daemon, many rooms](architecture/0001-one-daemon-many-rooms.md): the shell
@@ -52,13 +53,43 @@ the previous package aside first. Use `desktop:dev`, not a bare `cargo run`: a
 debug binary loads its status page from the Tauri CLI's development server.
 Rust tests: `cargo test` in `desktop/src-tauri`.
 
+## Signed release
+
+```sh
+bun run desktop:release --library /path/to/libwormdb_ffi.dylib
+```
+
+[`scripts/macos-release.sh`](../scripts/macos-release.sh) needs a Developer ID
+Application identity and a saved `notarytool` Keychain profile
+(`APPLE_NOTARY_KEYCHAIN_PROFILE`, default `agent-portal-notary`; create one with
+`xcrun notarytool store-credentials`). It strips Apple credential variables from
+the environment, so passwords and API keys never pass through it. It builds from
+a temporary worktree of a commit (`--ref`, default `HEAD`) and requires the
+runtime manifest to pin that clean commit, so uncommitted work in the checkout,
+including another session's, never enters a notarized artifact.
+
+1. Packages the runtime with `--codesign-identity`: `bun` (hardened runtime plus
+   the JIT entitlements in `scripts/macos/bun.entitlements`) and the WormDB dylib
+   are signed before the manifest hashes them, so first-run verification checks
+   the signed bytes.
+2. Builds the signed app, confirms the bundled binaries carry the team ID and
+   Bun's JIT entitlement, and runs a strict deep signature check.
+3. Notarizes, staples, and runs a Gatekeeper check on the app, then builds a
+   signed DMG in `.release/` and notarizes and staples it too.
+
+The Cargo build cache is shared with the checkout; the app lands in the usual
+`desktop/src-tauri/target/release/bundle/macos/`.
+
+Earlier outputs are moved aside with a timestamp, never deleted. `--no-notarize`
+produces a signed build without submitting to Apple.
+
 For isolated checks, set `MESHROOMS_DATA_DIR` and `MESHROOMS_PORT`, or run the
 built app binary with a temporary `HOME` to exercise first-run installation
 without touching the real runtime or node.
 
 ## Not yet done
 
-Developer ID signing and notarization, Login Items attribution through
+CI signing (releases are built on a maintainer Mac), Login Items attribution through
 `SMAppService`, runtime upgrades, Windows/Linux shell builds, tray display of
 transport/pending delivery state, and agent watching status. The tray menu has
 been built but its clicks were not exercised in automated checks.

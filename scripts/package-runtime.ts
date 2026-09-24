@@ -18,6 +18,8 @@ export type PackageOptions = {
   outputDir: string;
   externalBun?: boolean;
   nativeLibraryPath?: string;
+  /** macOS only: Developer ID identity for bun and the native library, applied before hashing. */
+  codesignIdentity?: string;
 };
 
 export type PackageResult = {
@@ -96,6 +98,10 @@ export async function packageRuntime(options: PackageOptions): Promise<PackageRe
   const target: PackageTarget | undefined = TARGETS[`${process.platform}-${process.arch}` as keyof typeof TARGETS];
   if (!target) {
     throw new Error(`packageRuntime currently targets Windows x64 and macOS arm64 only. Detected: ${process.platform}-${process.arch}`);
+  }
+
+  if (options.codesignIdentity && target.platform !== 'darwin') {
+    throw new Error('Code signing during packaging is only supported for macOS bundles.');
   }
 
   const sourceDir = resolve(options.sourceDir);
@@ -237,6 +243,18 @@ export async function packageRuntime(options: PackageOptions): Promise<PackageRe
     relativeFiles.push(target.bun);
   }
 
+  // 7b. Sign before hashing: re-signing rewrites the binaries, and notarization requires
+  // Developer ID with hardened runtime for every Mach-O file in the app bundle.
+  if (options.codesignIdentity) {
+    const sign = (file: string, entitlements?: string) => {
+      execFileSync('/usr/bin/codesign', ['--force', '--timestamp', '--options', 'runtime', '--sign', options.codesignIdentity!,
+        ...(entitlements ? ['--entitlements', entitlements] : []), file], { stdio: 'pipe' });
+      execFileSync('/usr/bin/codesign', ['--verify', '--strict', file], { stdio: 'pipe' });
+    };
+    sign(join(destNativeDir, target.library));
+    if (!options.externalBun) sign(join(outputDir, target.bun), join(import.meta.dir, 'macos', 'bun.entitlements'));
+  }
+
   // 8. Write minimal package.json
   const minimalPackageJson = {
     name: 'meshrooms-runtime',
@@ -282,6 +300,7 @@ if (import.meta.main) {
   let outputDir = resolve(root, '.local', 'packages', 'current');
   let externalBun = false;
   let nativeLibraryPath: string | undefined;
+  let codesignIdentity: string | undefined;
 
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
@@ -293,8 +312,10 @@ if (import.meta.main) {
       externalBun = true;
     } else if (args[i] === '--library') {
       nativeLibraryPath = resolve(args[++i]);
+    } else if (args[i] === '--codesign-identity') {
+      codesignIdentity = args[++i];
     } else if (args[i] === '--help' || args[i] === '-h') {
-      console.log('Usage: bun run scripts/package-runtime.ts [--source PATH] [--out PATH] [--library DLL] [--external-bun]');
+      console.log('Usage: bun run scripts/package-runtime.ts [--source PATH] [--out PATH] [--library DLL] [--external-bun] [--codesign-identity NAME]');
       process.exit(0);
     } else {
       console.error(`Unknown argument: ${args[i]}`);
@@ -302,7 +323,7 @@ if (import.meta.main) {
     }
   }
 
-  packageRuntime({ sourceDir, outputDir, externalBun, nativeLibraryPath })
+  packageRuntime({ sourceDir, outputDir, externalBun, nativeLibraryPath, codesignIdentity })
     .then((result) => {
       console.log(JSON.stringify({ event: 'runtime.packaged', ...result }, null, 2));
     })

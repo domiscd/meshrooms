@@ -21,6 +21,7 @@
     "desktop:dev": "bun run build && tauri dev",
     "desktop:runtime": "bun run build && bun run scripts/package-runtime.ts --out .local/packages/desktop-runtime",
     "desktop:build": "tauri build --config desktop/src-tauri/tauri.release.conf.json",
+    "desktop:release": "bash scripts/macos-release.sh",
     "daemon": "bun run server/daemon.ts",
     "browser": "bun run server/browser/main.ts",
     "start": "bun run server/daemon.ts"

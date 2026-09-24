@@ -102,9 +102,12 @@ daemon and changing a registered startup path need an explicit lifecycle step;
 the packager itself neither stops daemons nor overwrites existing output.
 
 This packaging slice targets Windows x64 and macOS arm64 only; other platforms fail
-closed. The installer and release procedure are Windows-only: there is no macOS
-installer, code signing, or notarization. Signed releases, an automatic updater,
-other-platform bundles, and remote recipient bootstrap are not implemented.
+closed. The skill installer and public release procedure are Windows-only. On
+macOS, `--codesign-identity NAME` signs `bun` and the native library with
+Developer ID and hardened runtime before hashing; the notarized desktop shell
+bundles this package and installs it on first run ([desktop shell](desktop-shell.md)).
+An automatic updater, other-platform bundles, and remote recipient bootstrap
+are not implemented.
 The public release procedure is described in [releasing.md](releasing.md).
 Built UI inputs are restricted to the expected index and assets;
 unexpected files or symbolic links fail packaging instead of entering the bundle.
