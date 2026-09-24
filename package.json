@@ -18,6 +18,9 @@
     "test:source": "bun test ./server/node.test.ts ./server/http.test.ts ./server/instance.test.ts ./server/runtime.test.ts ./server/startup.test.ts ./server/windows-path.test.ts ./server/peer-bridge.test.ts ./server/meshguard.test.ts ./server/browser ./scripts",
     "meshrooms": "bun run server/cli.ts",
     "package:runtime": "bun run scripts/package-runtime.ts",
+    "desktop:dev": "bun run build && tauri dev",
+    "desktop:runtime": "bun run build && bun run scripts/package-runtime.ts --out .local/packages/desktop-runtime",
+    "desktop:build": "tauri build --config desktop/src-tauri/tauri.release.conf.json",
     "daemon": "bun run server/daemon.ts",
     "browser": "bun run server/browser/main.ts",
     "start": "bun run server/daemon.ts"
@@ -28,6 +31,7 @@
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
     "@types/react": "^19.3.0",

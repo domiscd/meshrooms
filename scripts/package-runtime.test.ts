@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { packageRuntime, type PackageManifest } from './package-runtime';
 import { testDirectory } from '../server/test-directory';
@@ -215,5 +215,59 @@ describeWin('Runtime Packaging (packageRuntime)', () => {
     expect(manifest.files['LICENSE']).toBeDefined();
     expect(manifest.files['skills/meshrooms/LICENSE']).toBeDefined();
     expect(manifest.files['THIRD_PARTY_NOTICES.md']).toBeDefined();
+  });
+});
+
+const describeMac = process.platform === 'darwin' && process.arch === 'arm64' ? describe : describe.skip;
+
+describeMac('Runtime Packaging on macOS arm64 (packageRuntime)', () => {
+  function createMacFixture(baseDir: string) {
+    createMockSourceFixture(baseDir);
+    writeFileSync(join(baseDir, '.local', 'native', 'libwormdb_ffi.dylib'), 'MOCK_DYLIB_BINARY_CONTENT');
+  }
+
+  it('fails closed when the native dylib is missing', async () => {
+    const root = makeDir('mac-missing-dylib');
+    const sourceDir = join(root, 'source'); createMockSourceFixture(sourceDir);
+    await expect(packageRuntime({ sourceDir, outputDir: join(root, 'out') })).rejects.toThrow(/WormDB native library is missing: .*libwormdb_ffi\.dylib/);
+    expect(existsSync(join(root, 'out'))).toBe(false);
+  });
+
+  it('packages a darwin-arm64 bundle with an executable bun and dylib', async () => {
+    const root = makeDir('mac-package');
+    const sourceDir = join(root, 'source'); createMacFixture(sourceDir);
+    const result = await packageRuntime({ sourceDir, outputDir: join(root, 'out') });
+    const out = result.directory;
+    expect(existsSync(join(out, 'bun'))).toBe(true);
+    expect(statSync(join(out, 'bun')).mode & 0o777).toBe(0o755);
+    expect(existsSync(join(out, 'bun.exe'))).toBe(false);
+    expect(readFileSync(join(out, '.local', 'native', 'libwormdb_ffi.dylib'), 'utf8')).toBe('MOCK_DYLIB_BINARY_CONTENT');
+    expect(existsSync(join(out, '.local', 'native', 'wormdb_ffi.dll'))).toBe(false);
+    for (const excluded of ['control.key', 'runtime.json', '.env', 'daemon.log', 'node_modules', 'server/daemon.test.ts', 'server/mockRoom.ts']) {
+      expect(existsSync(join(out, excluded))).toBe(false);
+    }
+    const manifest: PackageManifest = JSON.parse(readFileSync(result.manifestPath, 'utf8'));
+    expect(manifest.platform).toBe('darwin');
+    expect(manifest.arch).toBe('arm64');
+    expect(manifest.entry).toBe('bun run server/cli.ts');
+    expect(manifest.bun.bundled).toBe(true);
+    expect(manifest.files['bun']).toBe(createHash('sha256').update(readFileSync(process.execPath)).digest('hex'));
+    expect(manifest.files['.local/native/libwormdb_ffi.dylib']).toBeDefined();
+    expect(manifest.files['.local/native/wormdb_ffi.dll']).toBeUndefined();
+    for (const [relPath, expectedHash] of Object.entries(manifest.files)) {
+      expect(createHash('sha256').update(readFileSync(join(out, relPath))).digest('hex')).toBe(expectedHash);
+    }
+  });
+
+  it('honors an explicit library path and external Bun', async () => {
+    const root = makeDir('mac-external');
+    const sourceDir = join(root, 'source'); createMockSourceFixture(sourceDir);
+    const library = join(root, 'custom.dylib'); writeFileSync(library, 'CUSTOM_DYLIB');
+    const result = await packageRuntime({ sourceDir, outputDir: join(root, 'out'), externalBun: true, nativeLibraryPath: library });
+    const manifest: PackageManifest = JSON.parse(readFileSync(result.manifestPath, 'utf8'));
+    expect(manifest.bun).toEqual({ version: '1.4.2', bundled: false });
+    expect(manifest.files['bun']).toBeUndefined();
+    expect(existsSync(join(result.directory, 'bun'))).toBe(false);
+    expect(readFileSync(join(result.directory, '.local', 'native', 'libwormdb_ffi.dylib'), 'utf8')).toBe('CUSTOM_DYLIB');
   });
 });

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -24,10 +25,16 @@ export type PackageResult = {
   manifestPath: string;
 };
 
+const TARGETS = {
+  'win32-x64': { platform: 'win32', arch: 'x64', library: 'wormdb_ffi.dll', libraryLabel: 'WormDB native DLL', bun: 'bun.exe' },
+  'darwin-arm64': { platform: 'darwin', arch: 'arm64', library: 'libwormdb_ffi.dylib', libraryLabel: 'WormDB native library', bun: 'bun' },
+} as const;
+type PackageTarget = (typeof TARGETS)[keyof typeof TARGETS];
+
 export type PackageManifest = {
   schema: 1;
-  platform: 'win32';
-  arch: 'x64';
+  platform: PackageTarget['platform'];
+  arch: PackageTarget['arch'];
   version: string;
   bun: { version: string; bundled: boolean };
   git: {
@@ -86,8 +93,9 @@ function copyRecursive(src: string, dest: string, filesToHash: string[], rootDes
 }
 
 export async function packageRuntime(options: PackageOptions): Promise<PackageResult> {
-  if (process.platform !== 'win32' || process.arch !== 'x64') {
-    throw new Error(`packageRuntime currently targets Windows x64 only. Detected: ${process.platform}-${process.arch}`);
+  const target: PackageTarget | undefined = TARGETS[`${process.platform}-${process.arch}` as keyof typeof TARGETS];
+  if (!target) {
+    throw new Error(`packageRuntime currently targets Windows x64 and macOS arm64 only. Detected: ${process.platform}-${process.arch}`);
   }
 
   const sourceDir = resolve(options.sourceDir);
@@ -111,9 +119,9 @@ export async function packageRuntime(options: PackageOptions): Promise<PackageRe
     throw new Error(`Built UI is missing in source directory (${distDir}). Build UI before packaging.`);
   }
 
-  const dllPath = options.nativeLibraryPath ? resolve(options.nativeLibraryPath) : join(sourceDir, '.local', 'native', 'wormdb_ffi.dll');
+  const dllPath = options.nativeLibraryPath ? resolve(options.nativeLibraryPath) : join(sourceDir, '.local', 'native', target.library);
   if (!existsSync(dllPath)) {
-    throw new Error(`Required WormDB native DLL is missing: ${dllPath}`);
+    throw new Error(`Required ${target.libraryLabel} is missing: ${dllPath}`);
   }
 
   const serverDir = join(sourceDir, 'server');
@@ -216,16 +224,17 @@ export async function packageRuntime(options: PackageOptions): Promise<PackageRe
     relativeFiles.push(file);
   }
 
-  // 6. Copy native DLL
+  // 6. Copy native library
   const destNativeDir = join(outputDir, '.local', 'native');
   mkdirSync(destNativeDir, { recursive: true });
-  copyFileSync(dllPath, join(destNativeDir, 'wormdb_ffi.dll'));
-  relativeFiles.push('.local/native/wormdb_ffi.dll');
+  copyFileSync(dllPath, join(destNativeDir, target.library));
+  relativeFiles.push(`.local/native/${target.library}`);
 
-  // 7. Copy bun executable as bun.exe
+  // 7. Copy bun executable (bun.exe on Windows)
   if (!options.externalBun) {
-    copyFileSync(process.execPath, join(outputDir, 'bun.exe'));
-    relativeFiles.push('bun.exe');
+    copyFileSync(process.execPath, join(outputDir, target.bun));
+    if (target.platform !== 'win32') chmodSync(join(outputDir, target.bun), 0o755);
+    relativeFiles.push(target.bun);
   }
 
   // 8. Write minimal package.json
@@ -249,12 +258,12 @@ export async function packageRuntime(options: PackageOptions): Promise<PackageRe
   const gitInfo = getGitInfo(sourceDir);
   const manifest: PackageManifest = {
     schema: 1,
-    platform: 'win32',
-    arch: 'x64',
+    platform: target.platform,
+    arch: target.arch,
     version: metadata.version,
     bun: { version: '1.4.2', bundled: !options.externalBun },
     git: gitInfo,
-    entry: 'bun.exe run server/cli.ts',
+    entry: `${target.bun} run server/cli.ts`,
     files: fileHashes,
   };
 

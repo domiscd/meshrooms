@@ -1,6 +1,6 @@
 # Portable Runtime Packaging
 
-Meshrooms provides a packaging script (`scripts/package-runtime.ts`) for the local daemon, native DLL, and built UI on Windows x64. Local bundles include Bun by default. Public releases use `--external-bun`: the skill installer downloads pinned Bun directly from upstream, verifies it, and adds it to the installed directory.
+Meshrooms provides a packaging script (`scripts/package-runtime.ts`) for the local daemon, native DLL, and built UI on Windows x64, and the same bundle for macOS arm64 when run there. Local bundles include Bun by default. Public releases use `--external-bun`: the skill installer downloads pinned Bun directly from upstream, verifies it, and adds it to the installed directory.
 
 The packaged output allows a user or automated agent to run Meshrooms without Bun installed globally, without repository checkouts, and without downloading `node_modules`.
 
@@ -33,6 +33,12 @@ The resulting package contains:
     └── native/
         └── wormdb_ffi.dll          # 64-bit WormDB native library with wormdb_open_sync
 ```
+
+A macOS arm64 bundle (packaged on an Apple Silicon Mac) has the same layout with
+two differences: Bun is copied as `bun` (mode 0755) instead of `bun.exe`, and the
+native library is `.local/native/libwormdb_ffi.dylib` (default source
+`.local/native/libwormdb_ffi.dylib`, or `--library PATH`). Its manifest records
+`"platform": "darwin"`, `"arch": "arm64"`, and `"entry": "bun run server/cli.ts"`.
 
 ## Manifest (`manifest.json`)
 
@@ -95,7 +101,9 @@ Set `MESHROOMS_HOME` when using another runtime location. Upgrading a running
 daemon and changing a registered startup path need an explicit lifecycle step;
 the packager itself neither stops daemons nor overwrites existing output.
 
-This packaging slice is Windows x64 only. Signed releases, an automatic updater,
+This packaging slice targets Windows x64 and macOS arm64 only; other platforms fail
+closed. The installer and release procedure are Windows-only: there is no macOS
+installer, code signing, or notarization. Signed releases, an automatic updater,
 other-platform bundles, and remote recipient bootstrap are not implemented.
 The public release procedure is described in [releasing.md](releasing.md).
 Built UI inputs are restricted to the expected index and assets;

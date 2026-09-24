@@ -19,3 +19,7 @@ clients/
 *.zip
 .release/
 .impeccable/design.json
+
+# Desktop shell build output
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
