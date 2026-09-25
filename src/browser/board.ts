@@ -71,6 +71,55 @@ export function foldBoard(ops: TaskBody[]): Task[] {
 }
 
 /**
+ * One line of task history for the conversation, as of `at`. A field is set only when it changed; a null assignee
+ * means unassigned. `updated` stands for a change whose previous state is no longer known.
+ */
+export type TaskEvent = {
+  id: string; taskId: string; memberId: string; at: number; title: string;
+  created?: true; removed?: true; updated?: true; renamedFrom?: string; status?: TaskStatus; assigneeId?: string | null; notes?: true;
+};
+/** Consecutive changes by one person to one task within this window read as one line. */
+export const TASK_EVENT_WINDOW = 120_000;
+
+/**
+ * Task history, one line per change that decided the board: each winning operation compared with the one before it.
+ * A run of quick changes by the same person becomes one line describing the net change. Compaction drops operations,
+ * so a change whose predecessor is gone is reported only as an update, and its intermediate steps not at all.
+ */
+export function taskTimeline(ops: TaskBody[]): TaskEvent[] {
+  const events: TaskEvent[] = [];
+  for (const list of group(ops).values()) {
+    const sorted = [...list].sort(compare), removal = sorted.find(op => op.removed);
+    const steps = chain(sorted.filter(op => !op.removed && (!removal || compare(op, removal) < 0)));
+    const lines: TaskEvent[] = [];
+    let start = 0;
+    steps.forEach((last, i) => {
+      const next = steps[i + 1];
+      if (next && next.memberId === last.memberId && next.revision === last.revision + 1 && next.at - last.at <= TASK_EVENT_WINDOW) return;
+      const first = steps[start], before = steps[start - 1]; start = i + 1;
+      const line: TaskEvent = { id: last.id, taskId: last.taskId, memberId: last.memberId, at: last.at, title: last.title };
+      if (!before) Object.assign(line, first.revision === 1 ? { created: true } : { updated: true }, first.revision === 1 && last.status !== 'todo' ? { status: last.status } : {}, first.revision === 1 && last.assigneeId ? { assigneeId: last.assigneeId } : {});
+      else if (before.revision + 1 !== first.revision) line.updated = true;
+      else {
+        if (before.title !== last.title) line.renamedFrom = before.title;
+        if (before.status !== last.status) line.status = last.status;
+        if (before.assigneeId !== last.assigneeId) line.assigneeId = last.assigneeId;
+        if (before.notes !== last.notes) line.notes = true;
+        if (Object.keys(line).length === 5) return; // Changed and changed back.
+      }
+      lines.push(line);
+    });
+    if (removal) {
+      const previous = lines.at(-1);
+      if (previous?.memberId === removal.memberId && removal.at - previous.at <= TASK_EVENT_WINDOW) lines.pop();
+      lines.push({ id: removal.id, taskId: removal.taskId, memberId: removal.memberId, at: removal.at, title: removal.title, removed: true });
+    }
+    events.push(...lines);
+  }
+  return events.sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1));
+}
+
+/**
  * Drops operations no longer needed to fold the same board, so a busy room stays under MAX_TASK_OPS. Per task it keeps
  * the first and last chain steps and the steps around the assignment; a removed task keeps one removal. Operations are
  * only dropped, never rewritten, so every signature still verifies and task content converges whatever each device

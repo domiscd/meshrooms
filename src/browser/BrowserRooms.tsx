@@ -1,8 +1,9 @@
-import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react';
-import { mentionedIds, type Task } from '../collab';
-import { FloorControl, MAX_MESSAGE_FILES, MAX_UPLOAD_BYTES, MentionText, MessageAttachments, PendingFiles, TaskBoard, formatBytes, uploadName, useMentions, type AttachmentSource, type PendingFile } from '../prototype/Collaboration';
+import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { mentionedIds, type Task, type TaskStatus } from '../collab';
+import { FloorControl, MAX_MESSAGE_FILES, MAX_UPLOAD_BYTES, MentionText, MessageAttachments, PendingFiles, TaskBoard, formatBytes, uploadName, useAutoGrow, useMentions, useStickToBottom, type AttachmentSource, type PendingFile } from '../prototype/Collaboration';
 import { Wordmark } from '../prototype/RoomPrototype';
 import type { Attachment, Participant, RoomSnapshot, TaskDraft } from '../room';
+import { taskTimeline, type TaskBody, type TaskEvent } from './board';
 import { BrowserApi } from './client';
 import { IMAGE_TYPES, attachmentRef, displayKind, shownText, type AttachmentRef } from './files';
 import { BrowserPeers, type FileView, type SavedMessage } from './peers';
@@ -61,6 +62,20 @@ const grouped = (a: SavedMessage | undefined, b: SavedMessage) => !!a && a.packe
 function dayLabel(at: number) {
   return sameDay(at, Date.now()) ? 'Today' : new Date(at).toLocaleDateString([], { month: 'long', day: 'numeric', year: 'numeric' });
 }
+const statusMoves: Record<TaskStatus, string> = { todo: 'back to to-do', doing: 'to in progress', done: 'to done' };
+/** "Igor assigned “Fix header” to Vesper and moved it to in progress". The title leads; later phrases say "it". */
+function describeTask(event: TaskEvent, name: (memberId: string, subject?: boolean) => string) {
+  const title = `“${event.title}”`, phrases: string[] = [], it = () => phrases.length ? 'it' : title;
+  if (event.removed) return `${name(event.memberId, true)} removed ${title}`;
+  if (event.created) phrases.push(`created ${title}`);
+  if (event.updated) phrases.push(`updated ${title}`);
+  if (event.renamedFrom !== undefined) phrases.push(`renamed “${event.renamedFrom}” to ${title}`);
+  if (event.assigneeId !== undefined) phrases.push(event.assigneeId === null ? `unassigned ${it()}` : event.assigneeId === event.memberId ? `took ${it()}` : `assigned ${it()} to ${name(event.assigneeId)}`);
+  if (event.status) phrases.push(`moved ${it()} ${statusMoves[event.status]}`);
+  if (event.notes) phrases.push(`edited the notes on ${it()}`);
+  return `${name(event.memberId, true)} ${phrases.length > 1 ? `${phrases.slice(0, -1).join(', ')} and ${phrases.at(-1)}` : phrases[0]}`;
+}
+type TranscriptItem = { message: SavedMessage; event?: undefined } | { event: TaskEvent; message?: undefined };
 
 export function BrowserRooms() {
   const [api] = useState(() => new BrowserApi());
@@ -78,7 +93,6 @@ export function BrowserRooms() {
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [retry, setRetry] = useState(0);
-  const [unread, setUnread] = useState(0);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [liveMessage, setLiveMessage] = useState<{ id: string; text: string }>();
   const [replyId, setReplyId] = useState<string>();
@@ -93,12 +107,14 @@ export function BrowserRooms() {
   const [chosen, setChosen] = useState<ChosenFile[]>([]);
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const [taskOps, setTaskOps] = useState<TaskBody[]>([]);
+  const [highlight, setHighlight] = useState<string>();
   const composer = useRef<HTMLTextAreaElement>(null);
   const currentStatus = useRef<RoomStatus | undefined>(undefined);
   const lastRequest = useRef<JoinRequest | undefined>(undefined);
   const peers = useRef<BrowserPeers | null>(null);
   const everJoined = useRef(false);
-  const transcript = useRef<HTMLElement>(null);
+  const stick = useStickToBottom();
   const detailsHeading = useRef<HTMLHeadingElement>(null);
   const detailsButton = useRef<HTMLButtonElement>(null);
   const admitted = !!status?.memberId;
@@ -107,6 +123,7 @@ export function BrowserRooms() {
   const pending = status?.request?.state === 'pending';
   const participants = participantsOf(status?.members);
   const mentions = useMentions(participants, status?.memberId, composer, setText);
+  useAutoGrow(composer, text);
   const agents = status?.members?.filter(isAgent) || [];
   const people = (status?.members?.length || 0) - agents.length;
   const reply = messages.find(m => m.packet.body.id === replyId);
@@ -116,6 +133,16 @@ export function BrowserRooms() {
     return member!.operatorId === status?.memberId ? 'you' : status?.members?.find(m => m.id === member!.operatorId)?.name || 'a former member';
   };
   const nameOf = (memberId: string) => status?.members?.find(m => m.id === memberId)?.name || 'Former member';
+  /** Task changes read as quiet lines between messages, placed by time. They are local views, never sent. */
+  const timeline = useMemo(() => taskTimeline(taskOps), [taskOps]);
+  const items = useMemo((): TranscriptItem[] => {
+    const merged: TranscriptItem[] = []; let next = 0;
+    for (const message of messages) {
+      while (next < timeline.length && timeline[next].at <= message.packet.body.at) merged.push({ event: timeline[next++] });
+      merged.push({ message });
+    }
+    return [...merged, ...timeline.slice(next).map(event => ({ event }))];
+  }, [messages, timeline]);
 
   useEffect(() => {
     let disposed = false, timer: ReturnType<typeof setTimeout>, wake: (() => void) | undefined;
@@ -144,18 +171,14 @@ export function BrowserRooms() {
           if (disposed) return;
           if (added) {
             const own = added.packet.body.deviceId === device.id;
-            const scroller = transcript.current;
-            const atBottom = !!scroller && scroller.clientHeight > 0 && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 100;
-            const usingControls = !!document.activeElement?.closest('.browser-requests, .browser-details');
-            if (own || (atBottom && !usingControls)) requestAnimationFrame(() => scrollToLatest());
-            else setUnread(count => count + 1);
+            stick.arrived(own);
             if (!own) {
               const author = currentStatus.current?.members?.find(p => p.id === added.packet.body.memberId)?.name || 'Room member';
               setLiveMessage({ id: added.packet.body.id, text: `${author}: ${shownText(added.packet.body) || `shared ${fileNames(added.packet.body)}`}` });
             }
           }
           setMessages(m); setConnected(c);
-        }, message => { if (!disposed) setNetwork(message); }, board => { if (!disposed) setTasks(board); }, view => { if (!disposed) setFiles(view); });
+        }, message => { if (!disposed) setNetwork(message); }, (board, ops) => { if (!disposed) { setTasks(board); setTaskOps(ops); } }, view => { if (!disposed) setFiles(view); });
         peers.current = engine; await engine.load();
         while (!disposed) {
           try {
@@ -191,7 +214,6 @@ export function BrowserRooms() {
     })().catch(e => { if (!disposed) { setError(e.message); setReady(true); } });
     return () => { disposed = true; engine?.stop(); peers.current = null; clearTimeout(timer); wake?.(); };
   }, [api, retry]);
-  useEffect(() => { if (admitted) scrollToLatest(); }, [admitted]);
   useEffect(() => { if (detailsOpen) detailsHeading.current?.focus(); }, [detailsOpen]);
   useEffect(() => {
     if (!admitted || !notice) return;
@@ -199,11 +221,12 @@ export function BrowserRooms() {
     return () => clearTimeout(timeout);
   }, [admitted, notice]);
 
-  function scrollToLatest() {
-    const scroller = transcript.current;
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
-    setUnread(0);
-  }
+  useEffect(() => {
+    if (!highlight) return;
+    const timeout = setTimeout(() => setHighlight(undefined), 2400);
+    return () => clearTimeout(timeout);
+  }, [highlight]);
+  function showTask(taskId: string) { setBoardOpen(true); setDetailsOpen(false); setHighlight(taskId); }
   function closeDetails() { setDetailsOpen(false); detailsButton.current?.focus(); }
 
   async function act(work: () => Promise<void>) {
@@ -410,23 +433,31 @@ export function BrowserRooms() {
               onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
               onDrop={e => { if (!e.dataTransfer.files.length) return; e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}>
               {dragging && <div className="drop-overlay" aria-hidden="true"><RoomIcon kind="clip" /><strong>Drop to attach</strong><span>Screenshots and files up to {formatBytes(MAX_UPLOAD_BYTES)}</span></div>}
-              <section ref={transcript} className="browser-transcript" role="log" aria-live="off" aria-label="Conversation" tabIndex={0} onScroll={e => { const el = e.currentTarget; if (el.scrollHeight - el.clientHeight - el.scrollTop < 100) setUnread(0); }}>
+              <section ref={stick.ref} className="browser-transcript" role="log" aria-live="off" aria-label="Conversation" tabIndex={0} onScroll={stick.onScroll}>
                 <div className="browser-message-list">
                   {!messages.length && <div className="browser-empty"><RoomIcon kind="chat" /><h2>{status.members!.length > 1 ? 'Ready for your first message' : status.requests?.length ? 'Your conversation starts here' : 'Bring someone into the room'}</h2><p>{status.members!.length > 1 ? 'Send a message below to start the conversation.' : status.requests?.length ? 'Someone is waiting to join. Admit them above to get started.' : 'Share the room link with someone, or open it on another device.'}</p></div>}
-                  {messages.map((m, index) => {
-                    const body = m.packet.body;
+                  {items.map((item, index) => {
+                    const previous = items[index - 1], at = item.message?.packet.body.at ?? item.event!.at;
+                    const day = (!index || !sameDay(previous.message?.packet.body.at ?? previous.event!.at, at)) && <div className="browser-day"><span>{dayLabel(at)}</span></div>;
+                    if (item.event) {
+                      const event = item.event, line = describeTask(event, (id, subject) => id === status.memberId ? subject ? 'You' : 'you' : nameOf(id));
+                      const time = <time dateTime={new Date(at).toISOString()}>{new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>;
+                      return <Fragment key={event.id}>{day}<p className="browser-task-line">
+                        {tasks.some(t => t.id === event.taskId) ? <button title="Show on the task board" onClick={() => showTask(event.taskId)}>{line}</button> : <span>{line}</span>}{time}</p></Fragment>;
+                    }
+                    const m = item.message, body = m.packet.body;
                     const member = status.members!.find(p => p.id === body.memberId);
                     const author = member?.name || 'Former member';
                     const target = body.replyTo ? messages.find(t => t.packet.body.id === body.replyTo)?.packet.body : undefined;
-                    const continuation = grouped(messages[index - 1], m) && !body.replyTo;
-                    const next = messages[index + 1];
+                    const continuation = grouped(previous?.message, m) && !body.replyTo;
+                    const next = items[index + 1]?.message;
                     const own = body.deviceId === status.deviceId;
                     const showReceipt = own && (!next || !grouped(m, next) || m.receipts.length < m.targets.length);
                     const forYou = body.memberId !== status.memberId && (mentionedIds(body.text, participants).includes(status.memberId!) || target?.memberId === status.memberId);
                     const operator = operatorOf(member);
                     const shown = shownText(body), quoted = target && (shownText(target) || fileNames(target));
                     return <Fragment key={body.id}>
-                      {(!index || !sameDay(messages[index - 1].packet.body.at, body.at)) && <div className="browser-day"><span>{dayLabel(body.at)}</span></div>}
+                      {day}
                       <article className={`browser-message ${continuation ? 'browser-message-continuation' : ''} ${forYou ? 'browser-message-for-you' : ''} ${isAgent(member) ? 'browser-message-agent' : ''}`}>
                         <MemberAvatar member={member} roomId={urlRoom} fallback={author} />
                         <div><header className={continuation ? 'sr-only' : ''}><strong>{author}</strong>{isAgent(member) && <span className="browser-role">agent</span>}{operator && <span className="browser-operator">for {operator}</span>}{body.memberId === status.memberId && <span className="browser-author-you">you</span>}<time dateTime={new Date(body.at).toISOString()}>{new Date(body.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
@@ -442,13 +473,13 @@ export function BrowserRooms() {
                 </div>
               </section>
               <div className="browser-compose-area">
-                {unread > 0 && <button className="secondary browser-unread" onClick={scrollToLatest}>Show {unread} new message{unread === 1 ? '' : 's'}</button>}
+                {stick.unread > 0 && <button className="secondary browser-unread" onClick={stick.toBottom}>{stick.unread === 1 ? 'New message' : `${stick.unread} new messages`} <span aria-hidden="true">↓</span></button>}
                 {mentions.list}
                 {reply && <div className="browser-reply-draft"><span>Replying to <strong>{reply.packet.body.memberId === status.memberId ? 'your message' : nameOf(reply.packet.body.memberId)}</strong></span><button className="browser-close" aria-label="Cancel reply" onClick={() => setReplyId(undefined)}><RoomIcon kind="close" /></button></div>}
                 <form className="browser-composer" onSubmit={send}><label className="sr-only" htmlFor="browser-message">Message {title}</label><textarea ref={composer} id="browser-message" value={text} {...mentions.inputProps}
                   onChange={e => { setText(e.target.value); mentions.track(e.target.value, e.target.selectionStart); }} onSelect={e => mentions.track(e.currentTarget.value, e.currentTarget.selectionStart)} onBlur={mentions.close}
                   onPaste={e => { const pasted = [...e.clipboardData.files]; if (pasted.length) { e.preventDefault(); addFiles(pasted); } }}
-                  onKeyDown={e => { if (mentions.onKeyDown(e)) return; if (e.key === 'Escape' && reply) { setReplyId(undefined); return; } if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(e); } }}
+                  onKeyDown={e => { if (mentions.onKeyDown(e)) return; if (e.key === 'Escape' && reply) { setReplyId(undefined); return; } if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); send(e); } }}
                   maxLength={4000} rows={2} placeholder={agents.length ? `Message ${title} · type @ to ask an agent` : `Message ${title}`} />
                   <PendingFiles files={chosen} onRemove={removeFile} onRetry={key => { const item = chosen.find(f => f.key === key); if (item) prepareFile(item); }} />
                   <div><span className="browser-compose-tools"><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(e.target.files); e.target.value = ''; }} />
@@ -457,7 +488,7 @@ export function BrowserRooms() {
                 <p className="browser-connection" role="status"><span className={`browser-connection-dot ${connected.length ? 'is-connected' : ''}`} aria-hidden="true" />{connected.length ? `Connected to ${connected.length} other device${connected.length === 1 ? '' : 's'}` : status.devices!.length > 1 ? 'Waiting for another device to connect' : 'You’re the first one here'}</p>
               </div>
             </div>
-            {boardOpen && <TaskBoard room={boardRoom} viewerId={status.memberId} disabled={!admitted} onClose={() => setBoardOpen(false)} actions={boardActions} />}
+            {boardOpen && <TaskBoard room={boardRoom} viewerId={status.memberId} disabled={!admitted} onClose={() => setBoardOpen(false)} actions={boardActions} highlight={highlight} />}
             <aside id="browser-room-details" className="browser-details" aria-label="Room details" hidden={!detailsOpen} onKeyDown={e => { if (e.key === 'Escape') closeDetails(); }}>
               <header className="browser-details-heading"><h2 tabIndex={-1} ref={detailsHeading}>Room details</h2><button className="browser-close" aria-label="Close room details" onClick={closeDetails}><RoomIcon kind="close" /></button></header>
               <section aria-label="People and agents in this room" className="browser-people"><h3>{agents.length ? 'People and agents' : 'People'} <span>{status.members!.length}</span></h3>

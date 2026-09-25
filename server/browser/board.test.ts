@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { compactBoard, foldBoard, syncChunks, taskBody, validTaskBody, type TaskBody } from '../../src/browser/board';
+import { compactBoard, foldBoard, syncChunks, taskBody, taskTimeline, validTaskBody, type TaskBody } from '../../src/browser/board';
 
 const roomId = crypto.randomUUID(), alex = crypto.randomUUID(), sam = crypto.randomUUID(), codex = crypto.randomUUID();
 const device = 'a'.repeat(64);
@@ -79,4 +79,43 @@ test('compaction keeps the same board with far fewer operations', () => {
   expect(foldBoard(compacted.map(p => p.body))).toEqual(foldBoard(ops));
   expect(foldBoard(ops).find(t => t.id === b)).toMatchObject({ assigneeId: sam, assignedBy: alex });
   expect(compactBoard(compacted)).toEqual(compacted);
+});
+
+test('the task timeline describes each winning change against the state before it', () => {
+  const ops: TaskBody[] = [];
+  const at = (minutes: number) => 1_000_000 + minutes * 60_000;
+  const apply = (memberId: string, minutes: number, change: Parameters<typeof taskBody>[0]['change'], taskId?: string, removed = false) => {
+    const current = taskId ? foldBoard(ops).find(t => t.id === taskId) : undefined;
+    const body = { ...taskBody({ roomId, deviceId: device, memberId, current, taskId, change, removed }), at: at(minutes) };
+    ops.push(body); return body.taskId;
+  };
+  const strip = ({ id: _, taskId: __, at: ___, ...event }: ReturnType<typeof taskTimeline>[number]) => event;
+  const fix = apply(alex, 0, { title: 'Fix header' });
+  apply(alex, 10, { assigneeId: codex }, fix);
+  apply(codex, 20, { status: 'doing' }, fix);
+  // Quick consecutive changes by one person read as one line with the net change.
+  apply(codex, 21, { status: 'done' }, fix);
+  apply(codex, 22, { notes: 'shipped' }, fix);
+  apply(sam, 30, { title: 'Fix the header' }, fix);
+  apply(sam, 40, { assigneeId: sam }, fix);
+  apply(sam, 50, { assigneeId: null, status: 'todo' }, fix);
+  // Changed and changed back within the window: nothing to say.
+  apply(alex, 60, { status: 'doing' }, fix); apply(alex, 61, { status: 'todo' }, fix);
+  const quick = apply(sam, 70, { title: 'Scratch', assigneeId: codex });
+  apply(sam, 71, {}, quick, true);
+  expect(taskTimeline(ops).map(strip)).toEqual([
+    { memberId: alex, title: 'Fix header', created: true },
+    { memberId: alex, title: 'Fix header', assigneeId: codex },
+    { memberId: codex, title: 'Fix header', status: 'done', notes: true },
+    { memberId: sam, title: 'Fix the header', renamedFrom: 'Fix header' },
+    { memberId: sam, title: 'Fix the header', assigneeId: sam },
+    { memberId: sam, title: 'Fix the header', assigneeId: null, status: 'todo' },
+    // Created and removed by one person moments apart: only the removal is shown.
+    { memberId: sam, title: 'Scratch', removed: true },
+  ]);
+  // Compaction drops intermediate history; the lines left never claim a change they cannot see.
+  const compacted = taskTimeline(compactBoard(ops.map(body => ({ body, signature: 's' }))).map(p => p.body)).filter(e => e.taskId === fix).map(strip);
+  expect(compacted[0]).toEqual({ memberId: alex, title: 'Fix header', created: true });
+  expect(compacted.at(-1)).toMatchObject({ memberId: alex, updated: true });
+  expect(taskTimeline([])).toEqual([]);
 });

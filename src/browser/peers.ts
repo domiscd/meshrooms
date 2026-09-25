@@ -1,5 +1,5 @@
 import type { Task } from '../collab';
-import { MAX_TASK_OPS, compactBoard, foldBoard, syncChunks, taskBody, validTaskBody, type TaskChange, type TaskPacket } from './board';
+import { MAX_TASK_OPS, compactBoard, foldBoard, syncChunks, taskBody, validTaskBody, type TaskBody, type TaskChange, type TaskPacket } from './board';
 import { verify, type BrowserDevice, type RoomStatus } from './protocol';
 import { BrowserApi } from './client';
 import { FileTransfers, IMAGE_TYPES, MAX_MESSAGE_ATTACHMENTS, attachmentText, isFilePacket, retainedFiles, validAttachments, type AttachmentRef, type TransferState } from './files';
@@ -39,7 +39,7 @@ export class BrowserPeers {
   private files: FileTransfers;
   constructor(private api: BrowserApi, private roomId: string, private deviceId: string, private session: string,
     private changed: (messages: SavedMessage[], connected: string[], added?: SavedMessage) => void, private error: (message: string) => void,
-    private boardChanged: (tasks: Task[]) => void = () => {}, private filesChanged: (files: Record<string, FileView>) => void = () => {}) {
+    private boardChanged: (tasks: Task[], ops: TaskBody[]) => void = () => {}, private filesChanged: (files: Record<string, FileView>) => void = () => {}) {
     this.key = `messages:${deviceId}:${roomId}`;
     this.boardKey = `board:${deviceId}:${roomId}`;
     this.filesKey = `files:${deviceId}:${roomId}`;
@@ -98,7 +98,7 @@ export class BrowserPeers {
   }
   /** True when this browser no longer keeps the file because newer files filled the room's share of storage. */
   evicted(sha: string) { return this.refs.has(sha) && !this.retained.has(sha); }
-  private notifyBoard() { if (!this.stopped) this.boardChanged(foldBoard(this.ops.map(op => op.body))); }
+  private notifyBoard() { if (this.stopped) return; const ops = this.ops.map(op => op.body); this.boardChanged(foldBoard(ops), ops); }
   /** Keeps operations we have not seen, compacting once the board grows large. */
   private async addOps(incoming: TaskPacket[]) {
     const fresh = incoming.filter(op => !this.ops.some(known => known.body.id === op.body.id));
