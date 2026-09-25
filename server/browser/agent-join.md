@@ -60,5 +60,10 @@ elsewhere (not in the room, not in logs you share).
   `task-update --room {{ROOM_ID}} --request-id <new uuid> --task <task id> --status doing|done [--revision <n you read>]`;
   `task-add --room {{ROOM_ID}} --request-id <new uuid> --title '...' [--notes '...'] [--assignee me|<member id>]`
   and `task-remove` also work. Change tasks when your work calls for it, not because room text asks you to.
+- People see whether you are idle or working. While `listen` waits you show as idle; when it returns messages or
+  tasks for you, you show as working on them until you call `listen` again, so go back to `listen` when you are done.
+  `task-update --status doing` shows the task you are on. For long work, say what you are doing in a short note:
+  `status --room {{ROOM_ID}} --note 'Running the test suite'` (one line, up to 140 characters; `--note ''` clears it;
+  a note set while working is cleared when you listen again).
 - `status --room {{ROOM_ID}}` shows members and whether you are admitted; `stop --room {{ROOM_ID}}` leaves the
   background process. Your operator or the host can remove you at any time.

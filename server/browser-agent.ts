@@ -9,7 +9,8 @@
  * State lives in a private directory (identity, messages, task operations, outbox, files).
  * `run` is the only process that talks to peers; `listen` reads its state, `send`/`task`
  * queue outgoing messages and task changes that `run` signs and delivers, and `attachment`
- * asks `run` (through wants/) to fetch a file it does not hold yet.
+ * asks `run` (through wants/) to fetch a file it does not hold yet. The agent's commands also
+ * record its activity (activity.json), which `run` announces to connected devices.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -22,6 +23,7 @@ import {
   validAttachments, type AttachmentRef, type FileStore, type TransferState,
 } from '../src/browser/files';
 import { cleanName, defaultName, sniff } from '../src/attachments';
+import { ACTIVITY_RESEND_MS, LISTEN_HEARTBEAT_MS, activityPacket, isActivityPacket, validActivity, validNote, type Activity, type ActivityOn } from '../src/browser/activity';
 import { evaluateWake, mayAgentSpeak, mentionedIds, type Floor, type Task } from '../src/collab';
 import type { Message, Participant } from '../src/room';
 
@@ -142,6 +144,26 @@ export class BrowserAgent {
   taskOps(): StoredOp[] { return readJson<StoredOp[]>(this.path('tasks.json'), []).map((p, i) => ({ ...p, seq: p.seq ?? i + 1 })); }
   /** Arrivals so far. Compaction drops operations but never moves the cursor back, so later assignments still wake. */
   boardCursor(ops = this.taskOps()) { return Math.max(readJson(this.path('board.json'), { seq: 0 }).seq, ops.at(-1)?.seq ?? 0); }
+  /** What the agent is doing, as its own commands last recorded it; undefined before its first `listen`. */
+  activity(): Activity | undefined { const a = readJson<unknown>(this.path('activity.json'), undefined); return validActivity(a) ? a : undefined; }
+  /** A change of state starts a new `since` and drops the note, which described the previous state. */
+  recordActivity(state: Activity['state'], on?: ActivityOn, now = Date.now()) {
+    const current = this.activity(), same = current?.state === state;
+    const messages = on?.messages?.length ? { messages: on.messages } : {}, tasks = on?.tasks?.length ? { tasks: on.tasks } : {};
+    const next: Activity = { state, since: same ? current!.since : now, heartbeat: now,
+      ...(state === 'working' && (messages.messages || tasks.tasks) ? { on: { ...messages, ...tasks } } : {}), ...(same && current!.note ? { note: current!.note } : {}) };
+    writeJson(this.path('activity.json'), next); return next;
+  }
+  /** The agent is still at it: refresh the heartbeat without changing what it is doing. */
+  touchActivity(now = Date.now()) { const current = this.activity(); if (current) writeJson(this.path('activity.json'), { ...current, heartbeat: now }); }
+  /** Set (or clear, with an empty note) the agent's note. Before any `listen`, a note means it is working. */
+  noteActivity(note: string, now = Date.now()) {
+    const text = note.trim();
+    if (text && !validNote(text)) throw new Error('Keep the note to one line of up to 140 characters.');
+    const { note: _, ...current } = this.activity() ?? { state: 'working' as const, since: now, heartbeat: now };
+    const next: Activity = { ...current, heartbeat: now, ...(text ? { note: text } : {}) };
+    writeJson(this.path('activity.json'), next); return next;
+  }
 
   /** The room as local-room shapes, so collab.ts rules apply unchanged. */
   view() {
@@ -174,6 +196,27 @@ export function boardTasks(ops: (TaskPacket & { seq?: number })[]): Task[] {
       if (b.taskId === task.id && b.revision === task.assignedRevision && b.assigneeId === task.assigneeId && b.memberId === task.assignedBy) position = p.seq ?? index + 1; });
     return { ...task, assignedRevision: position };
   });
+}
+
+type Channel = { readonly readyState: string; send(data: string): void };
+/**
+ * Announces the agent's activity to every open channel when it changes and again every 30 seconds, so a browser can
+ * tell a quiet agent from a silent bridge, and once to each channel as it opens. Call `tick` about once a second.
+ */
+export function activityAnnouncer(agent: BrowserAgent, channels: () => (Channel | undefined)[], now = () => Date.now()) {
+  let announced = '', announcedAt = 0;
+  const current = () => { const packet = activityPacket(agent.roomId, agent.activity(), now()); return packet && { packet, text: JSON.stringify(packet) }; };
+  const send = (channel: Channel | undefined, text: string) => { if (channel?.readyState === 'open') try { channel.send(text); } catch { /* Sent again within 30 seconds. */ } };
+  return {
+    tick() {
+      const next = current(); if (!next) return;
+      const { at: _, heartbeat: __, ...state } = next.packet, key = JSON.stringify(state);
+      if (key === announced && now() - announcedAt < ACTIVITY_RESEND_MS) return;
+      announced = key; announcedAt = now();
+      for (const channel of channels()) send(channel, next.text);
+    },
+    opened(channel: Channel) { const next = current(); if (next) send(channel, next.text); },
+  };
 }
 
 /** Long-running peer loop: presence, signaling, data channels, storage, and outbox delivery. */
@@ -233,6 +276,9 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
     }
   };
 
+  const activity = activityAnnouncer(agent, () => [...peers.values()].map(p => p.channel));
+  setInterval(activity.tick, 1000);
+
   const flush = () => {
     const messages = agent.messages();
     for (const [id, peer] of peers) {
@@ -249,14 +295,16 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
       // Exchange boards so either side catches up on tasks changed while apart.
       for (const chunk of syncChunks(agent.roomId, agent.taskOps().map(({ body, signature }) => ({ body, signature })))) channel.send(JSON.stringify(chunk));
       transfers.opened(id);
+      activity.opened(channel);
       flush();
     });
-    if (channel.readyState === 'open') transfers.opened(id);
+    if (channel.readyState === 'open') { transfers.opened(id); activity.opened(channel); }
     channel.onMessage.subscribe(raw => {
       const text = raw.toString(); if (text.length > 20_000) return;
       let packet: Packet; try { packet = JSON.parse(text); } catch { return; }
       // File transfers bypass the serialized queue: chunks arrive by the hundred and are cheap to check.
       if (isFilePacket(packet)) { if (peers.get(id) === peer && status?.devices?.some(d => d.id === id)) transfers.handle(id, packet); return; }
+      if (isActivityPacket(packet)) return; // For people's rosters; agents learn nothing from each other's activity.
       void incoming(packet).catch(error => log(`incoming: ${error.message}`));
     });
     const incoming = (packet: Packet) => transaction(async () => {
@@ -372,15 +420,28 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
   }
 }
 
-/** Wait until this agent is addressed in the browser room (same semantics as local `listen`). */
+/**
+ * Wait until this agent is addressed in the browser room (same semantics as local `listen`). Calling it means the
+ * agent is idle; returning what addressed it means it is working on that until it listens again.
+ */
 export async function listenBrowser(agent: BrowserAgent, after: string | undefined, seconds: number, boardAfter?: number) {
   const deadline = Date.now() + seconds * 1000;
+  let beat = 0;
   while (true) {
     const view = agent.view(); if (!view.memberId) throw new Error('This agent is not admitted to the browser room yet.');
     const result = evaluateWake(view, view.memberId, after, boardAfter);
-    if (result.state !== 'waiting') return { roomId: agent.roomId, participantId: view.memberId, floor: view.floor, ...result };
-    if (Date.now() >= deadline) return { state: 'timeout', roomId: agent.roomId, participantId: view.memberId, floor: view.floor, messages: [], cursor: after,
-      boardCursor: boardAfter ?? view.boardRevision, observed: result.messages.filter(m => m.authorId !== view.memberId).length };
+    if (result.state !== 'waiting') {
+      // History without anything for this agent is catching up, not work.
+      if (result.addressed.length || result.tasks.length) agent.recordActivity('working', { messages: result.addressed.slice(-8), tasks: result.tasks.map(t => t.id).slice(-8) });
+      else agent.recordActivity('idle');
+      return { roomId: agent.roomId, participantId: view.memberId, floor: view.floor, ...result };
+    }
+    if (!beat || Date.now() - beat >= LISTEN_HEARTBEAT_MS) { if (beat) agent.touchActivity(); else agent.recordActivity('idle'); beat = Date.now(); }
+    if (Date.now() >= deadline) {
+      agent.touchActivity();
+      return { state: 'timeout', roomId: agent.roomId, participantId: view.memberId, floor: view.floor, messages: [], cursor: after,
+        boardCursor: boardAfter ?? view.boardRevision, observed: result.messages.filter(m => m.authorId !== view.memberId).length };
+    }
     await Bun.sleep(500);
   }
 }
@@ -393,6 +454,7 @@ export async function sendBrowser(agent: BrowserAgent, text: string, replyTo: st
   if (replyTo && !view.messages.some(m => m.id === replyTo)) throw new Error('The reply target is not in this browser room.');
   if (!mayAgentSpeak(view, view.memberId, replyTo)) throw new Error('This room is humans-first: agents speak only when a person addresses them. Reply to a message that mentions you or replies to you.');
   const id = requestId; // Stable per logical send, so a retry never duplicates.
+  if (agent.activity()?.state === 'working') agent.touchActivity();
   const sent = agent.messages().find(m => m.packet.body.id === id);
   let attachments = sent?.packet.body.attachments;
   if (!sent) {
@@ -449,6 +511,15 @@ export async function attachmentBrowser(agent: BrowserAgent, key: string, out: s
   return { path, id: ref.id, name: ref.name, type: ref.type, kind, size: ref.size, sha256: ref.sha256, ...(ref.width ? { width: ref.width, height: ref.height } : {}) };
 }
 
+/** Starting a task means working on it; finishing, reopening or removing it means that task is no longer what the agent is on. */
+function taskActivity(agent: BrowserAgent, taskId: string, status: TaskChange['status'], removed: boolean) {
+  const current = agent.activity(), on = current?.state === 'working' ? current.on : undefined;
+  const others = (on?.tasks || []).filter(id => id !== taskId);
+  if (status === 'doing' && !removed) agent.recordActivity('working', { messages: on?.messages, tasks: [taskId, ...others].slice(0, 8) });
+  else if (on?.tasks?.includes(taskId)) agent.recordActivity('working', { messages: on.messages, tasks: others });
+  else if (current?.state === 'working') agent.touchActivity();
+}
+
 /** Queue a task change for `run` to sign and share; returns the task once it is on this device's board. */
 export async function taskBrowser(agent: BrowserAgent, input: { requestId: string; taskId?: string; revision?: number; change: TaskChange; removed?: boolean }) {
   const view = agent.view(); if (!view.memberId) throw new Error('This agent is not admitted to the browser room yet.');
@@ -466,6 +537,7 @@ export async function taskBrowser(agent: BrowserAgent, input: { requestId: strin
   }
   if (!done && !input.taskId && !change.title?.trim()) throw new Error('Use --title for the new task.');
   if (!done) writeJson(join(agent.dir, 'outbox', `${Date.now()}-${input.requestId}.json`), { type: 'task', id: input.requestId, taskId, change, ...(input.removed ? { removed: true } : {}) } satisfies TaskIntent);
+  taskActivity(agent, taskId, change.status, !!input.removed);
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     // Check the outbox first: `run` stores the operation before deleting the queued file.
