@@ -37,9 +37,10 @@ peer can reach the shared port on this node's mesh IP.
    filter (follow-up).
 2. The Meshrooms control adapter today speaks `STATUS`, `APPINFO`, `APPSEND`,
    `APPRECV`, and `XFER*`. It does not yet manage service policies.
-3. The preview process must **listen on the mesh IP** (or `0.0.0.0`). Binding
-   only to `127.0.0.1` is unreachable over WireGuard even when the policy allows
-   the port.
+3. The preview process must **listen only on the mesh IP**. Binding to
+   `127.0.0.1` is unreachable over WireGuard; binding to `0.0.0.0` would expose
+   the port on LAN interfaces outside MeshGuard's per-peer rule. Do not treat
+   `0.0.0.0` as acceptable without a separate OS firewall guarantee.
 4. Prefer `vite preview` / static builds. Raw Vite dev servers expose `/@fs/` and
    similar paths; a share is filesystem access unless the operator accepts that.
 
