@@ -233,6 +233,9 @@ describeWin('Runtime Packaging (packageRuntime)', () => {
     expect(manifest.version).toBe('0.1.0-alpha.1');
     expect(existsSync(join(result.directory, 'bun.exe'))).toBe(false);
     expect(manifest.files['LICENSE']).toBeDefined();
+    // Every runtime source is covered by the release hashes (Copilot on #10).
+    expect(manifest.files['src/attachments.ts']).toBeDefined();
+    expect(manifest.files['src/collab.ts']).toBeDefined();
     expect(manifest.files['skills/meshrooms/LICENSE']).toBeDefined();
     expect(manifest.files['THIRD_PARTY_NOTICES.md']).toBeDefined();
   });

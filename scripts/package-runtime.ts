@@ -211,8 +211,9 @@ export async function packageRuntime(options: PackageOptions): Promise<PackageRe
   copyFileSync(roomTs, join(destSrcDir, 'room.ts'));
   relativeFiles.push('src/room.ts');
   copyFileSync(collabTs, join(destSrcDir, 'collab.ts'));
-  copyFileSync(attachmentsTs, join(destSrcDir, 'attachments.ts'));
   relativeFiles.push('src/collab.ts');
+  copyFileSync(attachmentsTs, join(destSrcDir, 'attachments.ts'));
+  relativeFiles.push('src/attachments.ts');
 
   if (existsSync(setupTs)) {
     copyFileSync(setupTs, join(destSrcDir, 'setup.ts'));
