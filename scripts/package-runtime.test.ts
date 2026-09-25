@@ -35,6 +35,8 @@ function createMockSourceFixture(baseDir: string) {
   writeFileSync(join(serverDir, 'node.ts'), '// mock node\n');
   writeFileSync(join(serverDir, 'http.ts'), '// mock http\n');
   writeFileSync(join(serverDir, 'instance.ts'), '// mock instance\n');
+  writeFileSync(join(serverDir, 'browser-agent.ts'), '// shipped as its own bundle\n');
+  writeFileSync(join(serverDir, 'agent-cli.ts'), '// shipped as its own bundle\n');
 
   // Excluded test & helper files in server
   writeFileSync(join(serverDir, 'daemon.test.ts'), '// should be excluded\n');
@@ -54,6 +56,7 @@ function createMockSourceFixture(baseDir: string) {
   writeFileSync(join(srcDir, 'room.ts'), '// mock room types\n');
   writeFileSync(join(srcDir, 'setup.ts'), '// mock setup types\n');
   writeFileSync(join(srcDir, 'collab.ts'), '// mock shared room logic\n');
+  writeFileSync(join(srcDir, 'attachments.ts'), '// mock shared attachment rules\n');
   mkdirSync(join(baseDir, 'skills', 'meshrooms'), { recursive: true });
   writeFileSync(join(baseDir, 'skills', 'meshrooms', 'SKILL.md'), '---\nname: meshrooms\ndescription: Start a local room.\n---\n');
   writeFileSync(join(baseDir, 'skills', 'meshrooms', 'LICENSE'), 'Test license');
@@ -177,6 +180,11 @@ describeWin('Runtime Packaging (packageRuntime)', () => {
     expect(existsSync(join(outputDir, 'src', 'room.ts'))).toBe(true);
     expect(existsSync(join(outputDir, 'src', 'setup.ts'))).toBe(true);
     expect(existsSync(join(outputDir, 'src', 'collab.ts'))).toBe(true);
+    // Copilot's review of #10: server/attachments.ts imports it at runtime.
+    expect(existsSync(join(outputDir, 'src', 'attachments.ts'))).toBe(true);
+    // The browser bridge ships as its own bundle, never in the local runtime.
+    expect(existsSync(join(outputDir, 'server', 'browser-agent.ts'))).toBe(false);
+    expect(existsSync(join(outputDir, 'server', 'agent-cli.ts'))).toBe(false);
     expect(existsSync(join(outputDir, 'skills', 'meshrooms', 'SKILL.md'))).toBe(true);
     expect(existsSync(join(outputDir, '.local', 'native', 'wormdb_ffi.dll'))).toBe(true);
 

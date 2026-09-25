@@ -24,7 +24,7 @@ export const MAX_ROOM_FILES = 512;
 export const CHUNK_BYTES = 12_000;
 /** A sender waits while this much is queued on a channel, so a 10 MB file never floods the SCTP buffer. */
 export const HIGH_WATER = 1_000_000;
-const STALL_MS = 15_000, RETRY_MS = 20_000, BAD_MS = 10 * 60_000, PARALLEL = 3, UPLOADS_PER_PEER = 2;
+const STALL_MS = 15_000, RETRY_MS = 20_000, BAD_MS = 10 * 60_000, PARALLEL = 3, UPLOADS_PER_PEER = 2, UPLOADS_TOTAL = 6;
 
 const uuid = (v: unknown) => typeof v === 'string' && /^[a-f0-9-]{36}$/.test(v);
 export const isSha256 = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
@@ -113,7 +113,8 @@ export class FileTransfers {
   private incoming = new Map<string, Incoming>();
   private capable = new Set<string>();
   private announced = new Set<string>();
-  private uploads = new Map<string, { cancelled: boolean }>();
+  /** `loading` while the file is read from the store: a repeated request for it waits instead of reading it again. */
+  private uploads = new Map<string, { cancelled: boolean; loading: boolean }>();
   /** `peer:sha256` of peers whose bytes failed verification, until a time; kept when a fetch is abandoned and asked again. */
   private distrusted = new Map<string, number>();
   constructor(private o: Options) {}
@@ -148,7 +149,7 @@ export class FileTransfers {
   tick() {
     const now = this.now();
     for (const item of this.incoming.values()) {
-      if (item.source && now - item.since > STALL_MS) { item.tried.add(item.source); item.source = undefined; }
+      if (item.source && now - item.since > STALL_MS) this.skip(item, item.source);
       if (!item.source && now >= item.retryAt) { item.tried.clear(); item.retryAt = now + RETRY_MS; }
     }
     for (const [key, until] of this.distrusted) if (now >= until) this.distrusted.delete(key);
@@ -188,7 +189,11 @@ export class FileTransfers {
   private drop(peer: string, sha: string) {
     const item = this.incoming.get(sha);
     if (item?.source !== peer) return;
-    item.tried.add(peer); item.source = undefined; this.pump();
+    this.skip(item, peer); this.pump();
+  }
+  /** Stop asking this peer for a while: other holders are tried first, and every peer again after RETRY_MS. */
+  private skip(item: Incoming, peer: string) {
+    item.tried.add(peer); item.source = undefined; item.retryAt = Math.max(item.retryAt, this.now() + RETRY_MS);
   }
   private chunk(peer: string, p: Extract<FilePacket, { kind: 'file-chunk' }>) {
     const item = this.incoming.get(p.sha256);
@@ -203,7 +208,7 @@ export class FileTransfers {
     const item = this.incoming.get(sha);
     if (item?.source !== peer) return;
     item.source = undefined;
-    if (item.received < item.ref.size) { item.tried.add(peer); this.pump(); return; }
+    if (item.received < item.ref.size) { this.skip(item, peer); this.pump(); return; }
     const bytes = item.bytes!;
     item.verifying = true; // Not handed to another peer while hashing and storing.
     if (await sha256Hex(bytes) === sha) {
@@ -217,16 +222,20 @@ export class FileTransfers {
     item.verifying = false; this.pump();
   }
   private async serve(peer: string, sha: string, offset: unknown) {
+    const key = `${peer}:${sha}`, missing = () => { this.send(peer, { kind: 'file-missing', roomId: this.o.roomId, sha256: sha }); };
+    const previous = this.uploads.get(key);
+    if (previous?.loading) return; // Already reading this file for this peer; a flood of requests must not read it again.
+    // The upload slot is taken before the file is read, so requests beyond the limits never load files into memory.
+    const busy = [...this.uploads.keys()].filter(k => k.startsWith(`${peer}:`) && k !== key).length >= UPLOADS_PER_PEER
+      || (!previous && this.uploads.size >= UPLOADS_TOTAL);
     const ref = this.o.referenced(sha);
-    const bytes = ref && this.o.store.has(sha) ? await this.o.store.get(sha) : undefined;
-    const key = `${peer}:${sha}`;
-    const previous = this.uploads.get(key); if (previous) previous.cancelled = true;
-    const busy = [...this.uploads.keys()].filter(k => k.startsWith(`${peer}:`) && k !== key).length >= UPLOADS_PER_PEER;
-    if (!bytes || bytes.length !== ref!.size || !Number.isSafeInteger(offset) || (offset as number) < 0 || (offset as number) > bytes.length || busy) {
-      this.send(peer, { kind: 'file-missing', roomId: this.o.roomId, sha256: sha }); return;
-    }
-    const upload = { cancelled: false }; this.uploads.set(key, upload);
+    if (busy || !ref || !Number.isSafeInteger(offset) || (offset as number) < 0 || (offset as number) > ref.size || !this.o.store.has(sha)) { missing(); return; }
+    if (previous) previous.cancelled = true;
+    const upload = { cancelled: false, loading: true }; this.uploads.set(key, upload);
     try {
+      const bytes = await this.o.store.get(sha).catch(() => undefined); upload.loading = false;
+      if (upload.cancelled) return;
+      if (!bytes || bytes.length !== ref.size) { missing(); return; }
       for (let at = offset as number; at < bytes.length; at += CHUNK_BYTES) {
         while ((this.o.channel(peer)?.bufferedAmount ?? 0) > HIGH_WATER && !upload.cancelled && this.o.channel(peer)?.readyState === 'open') await new Promise(r => setTimeout(r, 10));
         if (upload.cancelled || !this.send(peer, this.packet(sha, at, bytes.subarray(at, at + CHUNK_BYTES)))) return;

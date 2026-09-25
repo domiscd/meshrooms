@@ -177,3 +177,38 @@ test('senders wait for the channel buffer to drain', async () => {
   expect(peak).toBeLessThan(1_000_000 + 20_000);
   expect(peak).toBeGreaterThan(900_000);
 });
+
+test("Copilot's review of #10: requests beyond the upload limits never read files", async () => {
+  const refs = new Map<string, AttachmentRef>(), bytes = new Map<string, Uint8Array>(), sent: any[] = [];
+  for (let i = 0; i < 5; i++) { const b = png(i); const ref = await attachmentRef(b, `${i}.png`); refs.set(ref.sha256, ref); bytes.set(ref.sha256, b); }
+  let reads = 0, release!: () => void; const gate = new Promise<void>(r => { release = r; });
+  const store: FileStore = { has: sha => bytes.has(sha), get: async sha => { reads++; await gate; return bytes.get(sha); }, put: async () => {} };
+  const channel = { readyState: 'open', bufferedAmount: 0, send: (data: string) => { sent.push(JSON.parse(data)); } };
+  const transfers = new FileTransfers({ roomId, store, referenced: sha => refs.get(sha), channel: () => channel, peers: () => ['peer'] });
+  const [first, ...others] = [...refs.keys()];
+  // Twenty requests for one file read it once; of the other files only one more fits the per-peer limit.
+  for (let i = 0; i < 20; i++) transfers.handle('peer', { kind: 'file-want', roomId, sha256: first, offset: 0 });
+  for (const sha of others) transfers.handle('peer', { kind: 'file-want', roomId, sha256: sha, offset: 0 });
+  expect(reads).toBe(2);
+  expect(sent.filter(p => p.kind === 'file-missing')).toHaveLength(3);
+  release(); await Bun.sleep(20);
+  expect(sent.filter(p => p.kind === 'file-done')).toHaveLength(2);
+});
+
+test("Copilot's review of #10: a stalled source is not asked again before the retry delay", async () => {
+  let now = 1_000_000; const asked: string[] = [];
+  const ref = await attachmentRef(png(), 'wanted.png');
+  const channel = (peer: string) => ({ readyState: 'open', bufferedAmount: 0, send: (data: string) => { if (JSON.parse(data).kind === 'file-want') asked.push(peer); } });
+  const transfers = new FileTransfers({ roomId, store: { has: () => false, get: async () => undefined, put: async () => {} },
+    referenced: () => ref, channel, peers: () => ['a', 'b'], now: () => now });
+  for (const peer of ['a', 'b']) transfers.handle(peer, { kind: 'files', roomId });
+  transfers.want(ref);
+  expect(asked).toEqual(['a']);
+  now += 16_000; transfers.tick();
+  expect(asked).toEqual(['a', 'b']); // a stalled: the other holder is asked, not a again
+  now += 16_000; transfers.tick();
+  expect(asked).toEqual(['a', 'b']); // both stalled: nobody is asked until the retry delay passes
+  now += 20_000; transfers.tick();
+  expect(asked).toHaveLength(3);
+});
+

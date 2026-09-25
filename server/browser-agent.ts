@@ -90,7 +90,8 @@ export class BrowserAgent {
       try { unlinkSync(this.files.path(sha)); } catch { /* Already gone. */ }
       return undefined;
     },
-    put: async (sha, bytes) => { if (!this.files.has(sha)) this.files.add(bytes); },
+    // Only verified bytes arrive here, so they always replace whatever is on disk (a damaged copy would block them otherwise).
+    put: async (_sha, bytes) => { this.files.add(bytes); },
     add: bytes => {
       const sha = sha256(bytes), path = this.files.path(sha), temporary = `${path}.${randomUUID()}.tmp`;
       writeFileSync(temporary, bytes, { mode: 0o600 }); renameSync(temporary, path); return sha;

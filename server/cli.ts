@@ -7,7 +7,6 @@ import { fingerprint, isUuid, tokenHash } from './model';
 import { ensureRunning, probeRuntime, type RuntimeRecord } from './runtime';
 import type { NodeSnapshot } from '../src/room';
 import { evaluateWake, type WakeResult } from '../src/collab';
-import { BrowserAgent, listenBrowser, parseConnectLink, parseRoomUrl, runBridge, sendBrowser } from './browser-agent';
 
 type ClientCredential = { version: 1; nodeId: string; dataDir: string; intentId: string; token: string; title: string; project: string; agentName: string };
 function parse(args: string[]) {
@@ -137,7 +136,13 @@ export async function runCli(args: string[]): Promise<unknown> {
     'browser-send --url ROOM_LINK --request-id UUID --text TEXT [--reply-to MESSAGE_ID]',
     'transport', 'descriptor --room UUID', 'pair --descriptor PATH (operator-approved two-node development pairing)'],
     options: ['--data-dir PATH', '--library PATH', '--port NUMBER', '--dev-origin URL'], note: 'Browser links expire after two minutes. Agent credential files stay private on this machine.' };
+  // The browser bridge (and its WebRTC dependency) loads only for browser-* commands, so the packaged local runtime,
+  // which does not ship it, starts without it.
+  const bridge = () => import('./browser-agent').catch(() => {
+    throw new Error('Browser room commands are not part of this runtime. Connect agents with meshrooms-agent.js from the /agent page of the room.');
+  });
   if (command === 'browser-join') {
+    const { BrowserAgent, parseConnectLink } = await bridge();
     // Agents join only through an agent link a person in the room made, so the room shows who operates them.
     const { origin, roomId, token } = parseConnectLink(requireText(values['--link'], '--link', 400));
     const agent = new BrowserAgent(resolve(values['--data-dir'] || defaultOptions().dataDir), origin, roomId);
@@ -152,6 +157,7 @@ export async function runCli(args: string[]): Promise<unknown> {
   }
   if (command.startsWith('browser-')) {
     // A local agent's own device in a hosted browser room; its key stays in the node data directory.
+    const { BrowserAgent, listenBrowser, parseRoomUrl, runBridge, sendBrowser } = await bridge();
     const { origin, roomId } = parseRoomUrl(requireText(values['--url'], '--url', 300));
     const agent = new BrowserAgent(resolve(values['--data-dir'] || defaultOptions().dataDir), origin, roomId);
     if (command === 'browser-run') { await runBridge(agent); return; }
