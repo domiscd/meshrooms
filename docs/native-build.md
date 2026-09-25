@@ -62,7 +62,8 @@ FFI library, refuses an existing `libwormdb_ffi.so`, and writes
 `wormdb.linux-x64.provenance.json` next to the candidate. Point
 `WORMDB_LIBRARY_PATH` at that `.so` for adapter and daemon tests.
 
-`--verify-only` checks against [native/linux-x64.lock.json](../native/linux-x64.lock.json)
-once that reviewed pin exists. Until then, treat the provenance hash as a
-candidate: run the persistence suite, then record the reviewed size and SHA-256
-in that lockfile without changing the Windows pin in `wormdb.lock.json`.
+`--verify-only` checks the exact reviewed hash in
+[native/linux-x64.lock.json](../native/linux-x64.lock.json). That pin records the
+qualified Ubuntu x86_64 artifact; it does not replace the Windows pin in
+`wormdb.lock.json`. A new compiler, source commit, or binary hash needs a new
+reviewed Linux lockfile entry after the persistence suite passes.

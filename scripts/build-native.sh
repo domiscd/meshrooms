@@ -164,7 +164,9 @@ done
 built_hash="$(sha256sum "$built" | awk '{print $1}')"
 built_size="$(stat -c '%s' "$built")"
 mkdir -p "$out_dir"
-cp --update=none "$built" "$library"
+# The earlier existence check refuses an existing output; a plain copy is enough
+# and stays portable on older coreutils (Ubuntu 22.04).
+cp "$built" "$library"
 
 python3 - "$out_dir/wormdb.linux-x64.provenance.json" "$candidate_commit" "$meshguard_commit" "$zig_version" "$built_hash" "$built_size" "$linux_lock_file" <<'PY'
 import json, os, sys
@@ -190,5 +192,5 @@ payload = {
     "matchesReviewedArtifact": matches,
 }
 open(path, "w", encoding="utf-8").write(json.dumps(payload, indent=2) + "\n")
-print(f"Native Linux candidate built from verified source pins: {os.path.dirname(path)}/libwormdb_ffi.so ({digest}). Run integration tests and review before recording native/linux-x64.lock.json.")
+print(f"Native Linux candidate built from verified source pins: {os.path.dirname(path)}/libwormdb_ffi.so ({digest}). Run integration tests; --verify-only checks native/linux-x64.lock.json.")
 PY
