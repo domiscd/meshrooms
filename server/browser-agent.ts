@@ -76,9 +76,10 @@ export class BrowserAgent {
     } catch { return false; }
   }
   /** A signed coordinator command. Retries of one logical action reuse its id. */
-  async command(action: Command['action'], payload: Record<string, unknown> = {}, id: string = randomUUID()): Promise<any> {
+  async command(action: Command['action'] | 'agent-redeem', payload: Record<string, unknown> = {}, id: string = randomUUID()): Promise<any> {
     const identity = await this.ensureIdentity();
-    const command: Command = { protocol: browserProtocol, origin: this.origin, id, at: Date.now(), action, roomId: this.roomId, payload };
+    // 'agent-redeem' joins the protocol with browser-room agents; older coordinators reject it with a clear error.
+    const command = { protocol: browserProtocol, origin: this.origin, id, at: Date.now(), action, roomId: this.roomId, payload } as Command;
     const response = await fetch(`${this.origin}/api/lobby`, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
       headers: { 'Content-Type': 'application/json', Origin: this.origin },
       body: JSON.stringify({ command, publicKey: identity.publicKey, signature: await this.sign(command) }) });
