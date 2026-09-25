@@ -22,6 +22,8 @@ test('mentions match roster names at word boundaries, prefer longer names, and e
   expect(mentionedIds('mail igor@codex.dev or @Codexes', people)).toEqual([]);
   expect(mentionedIds('(@Grok) thoughts?', people)).toEqual(['grok']);
   expect(mentionedIds('@agents please review', people)).toEqual(['codex', 'codex-cli', 'grok']);
+  // Copilot's review of #5: a participant named "agents" cannot capture @agents from every other agent.
+  expect(mentionedIds('@agents please review', [...people, { id: 'imposter', name: 'Agents', role: 'human' as const }])).toEqual(['codex', 'codex-cli', 'grok']);
   expect(mentionSegments('Hi @Grok!', people)).toEqual([{ text: 'Hi ' }, { text: '@Grok', mention: true }, { text: '!' }]);
 });
 
@@ -264,4 +266,12 @@ test("Copilot's review: an open floor does not let an operator-only agent speak 
   expect(mayAgentSpeak(room, 'codex', undefined)).toBe(false);
   expect(mayAgentSpeak(room, 'codex', 'm2')).toBe(true);
   expect(mayAgentSpeak({ ...room, participants: participants.map(p => ({ ...p, wake: 'anyone' as const })) }, 'codex', 'm1')).toBe(true);
+});
+
+test("Copilot's review of #5: nobody on a local node may be named agents", () => {
+  const { node } = memoryNode();
+  try {
+    expect(() => node.prepareRoom({ requestId: randomUUID(), title: 'Room', agentName: 'Agents', credentialHash: 'a'.repeat(64) })).toThrow('reserved');
+    expect(() => node.validateSetup({ requestId: randomUUID(), humanName: ' agents ', machineName: 'Test', startAtLogin: false })).toThrow('reserved');
+  } finally { node.close(); }
 });

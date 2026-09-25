@@ -156,7 +156,7 @@ export async function packageRuntime(options: PackageOptions): Promise<PackageRe
   for (const required of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'skills/meshrooms/LICENSE']) {
     if (!existsSync(join(sourceDir, required))) throw new Error(`Required notice missing: ${required}`);
   }
-  for (const input of [serverDir, join(serverDir, 'persistence'), join(sourceDir, 'src'), join(sourceDir, '.local'), join(sourceDir, '.local', 'native'), join(sourceDir, 'skills'), join(sourceDir, 'skills', 'meshrooms'), roomTs, setupTs, dllPath, skillPath]) {
+  for (const input of [serverDir, join(serverDir, 'persistence'), join(sourceDir, 'src'), join(sourceDir, '.local'), join(sourceDir, '.local', 'native'), join(sourceDir, 'skills'), join(sourceDir, 'skills', 'meshrooms'), roomTs, setupTs, collabTs, dllPath, skillPath]) {
     if (existsSync(input) && lstatSync(input).isSymbolicLink()) throw new Error(`Runtime inputs cannot contain links: ${input}`);
   }
 

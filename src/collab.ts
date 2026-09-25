@@ -24,6 +24,8 @@ export type Task = {
 
 /** `@agents` addresses every agent in the room. */
 export const AGENTS_MENTION = 'agents';
+/** Nobody may be named `agents`: `@agents` must keep addressing every agent. */
+export const reservedName = (name: string) => name.trim().toLowerCase() === AGENTS_MENTION;
 
 const boundary = (char: string | undefined) => char === undefined || !/[\p{L}\p{N}_]/u.test(char);
 
@@ -34,8 +36,9 @@ const boundary = (char: string | undefined) => char === undefined || !/[\p{L}\p{
 export function mentionedIds(text: string, participants: Pick<Participant, 'id' | 'name' | 'role'>[]): string[] {
   if (!text.includes('@')) return [];
   const lower = text.toLowerCase(); const taken = new Array<boolean>(text.length).fill(false); const found = new Set<string>();
-  const names = [...participants.map(p => ({ key: p.name.toLowerCase(), ids: [p.id] })),
-    { key: AGENTS_MENTION, ids: participants.filter(p => p.role === 'agent').map(p => p.id) }].sort((a, b) => b.key.length - a.key.length);
+  // `@agents` comes first so the stable sort keeps it ahead of any participant with an equally long name.
+  const names = [{ key: AGENTS_MENTION, ids: participants.filter(p => p.role === 'agent').map(p => p.id) },
+    ...participants.map(p => ({ key: p.name.toLowerCase(), ids: [p.id] }))].sort((a, b) => b.key.length - a.key.length);
   for (const { key, ids } of names) {
     let from = 0;
     while ((from = lower.indexOf(`@${key}`, from)) >= 0) {

@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { packageRuntime, type PackageManifest } from './package-runtime';
 import { testDirectory } from '../server/test-directory';
@@ -81,6 +81,16 @@ function createMockSourceFixture(baseDir: string) {
 const describeWin = process.platform === 'win32' && process.arch === 'x64' ? describe : describe.skip;
 
 describeWin('Runtime Packaging (packageRuntime)', () => {
+  it("rejects a linked src/collab.ts like the other runtime inputs (Copilot's review of #5)", async () => {
+    const root = makeDir('linked-collab'), source = join(root, 'source');
+    createMockSourceFixture(source);
+    writeFileSync(join(root, 'outside.ts'), '// outside the source tree');
+    rmSync(join(source, 'src', 'collab.ts'));
+    try { symlinkSync(join(root, 'outside.ts'), join(source, 'src', 'collab.ts'), 'file'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EPERM') return; throw error; } // Needs symlink rights on Windows.
+    await expect(packageRuntime({ sourceDir: source, outputDir: join(root, 'out') })).rejects.toThrow(/cannot contain links/);
+  });
+
   it('fails honestly when required inputs are missing', async () => {
     const root = makeDir('missing-inputs');
     const outputDir = join(root, 'pkg-out');
