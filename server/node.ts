@@ -102,9 +102,11 @@ export class LocalNode {
         const board = this.boards.get(id)!;
         return { id, title, project, sample, ...(peer ? { paired: true } : {}), floor: room.floor ?? DEFAULT_FLOOR,
           participants: people.map(person => {
-            if (person.state === 'remote' || person.role !== 'agent') return { ...person };
+            if (person.state === 'remote') return { ...person };
+            const local = { ...person, machine: this.catalog.settings.machineName };
+            if (person.role !== 'agent') return local;
             const connected = (this.connections.get(person.id) || 0) > 0 || (this.leases.get(person.id) || 0) > Date.now();
-            return { ...person, connected, detail: connected ? 'Agent connected on this machine' : 'Awaiting agent connection' };
+            return { ...local, ...this.agentAuthority(room, person.id), connected, detail: connected ? 'Agent connected on this machine' : 'Awaiting agent connection' };
           }),
           messages: this.histories.get(id)!.messages.map(({ requestId: _, fingerprint: __, ...message }) => {
             const mentions = mentionedIds(message.text, people);
@@ -268,6 +270,20 @@ export class LocalNode {
     if (!bytes) throw new NodeError(410, 'The attachment file is missing or damaged on this machine.');
     return { attachment: publicAttachment(record), bytes };
   }
+  /** Only the agent's operator (the local human, for a local agent) decides who can wake it. */
+  setAgentWake(input: { roomId?: unknown; requestId?: unknown; agentId?: unknown; wake?: unknown }, principal: Principal = this.owner): { roomId: string } {
+    this.assertReady(); this.requireOwner(principal); requestId(input.requestId);
+    const room = this.requireRoom(input.roomId, principal);
+    if (!['anyone', 'operator'].includes(input.wake as string)) throw new NodeError(400, 'Choose anyone or operator.');
+    const agent = typeof input.agentId === 'string' && room.participantIds.includes(input.agentId) ? this.person(input.agentId) : undefined;
+    if (agent?.role !== 'agent' || agent.state !== 'local') throw new NodeError(400, 'Choose an agent on this machine; each operator controls their own agents.');
+    const operatorOnly = new Set(room.operatorOnly ?? []);
+    if (input.wake === 'operator') operatorOnly.add(agent.id); else operatorOnly.delete(agent.id);
+    if (operatorOnly.size === (room.operatorOnly?.length ?? 0) && [...operatorOnly].every(id => room.operatorOnly?.includes(id))) return { roomId: room.id };
+    const next = structuredClone(this.catalog); const target = next.rooms.find(r => r.id === room.id)!;
+    if (operatorOnly.size) target.operatorOnly = [...operatorOnly]; else delete target.operatorOnly;
+    this.saveCatalog(next); return { roomId: room.id };
+  }
   setFloor(input: { roomId?: unknown; requestId?: unknown; floor?: unknown }, principal: Principal = this.owner): { roomId: string } {
     this.assertReady(); this.requireOwner(principal); requestId(input.requestId);
     const room = this.requireRoom(input.roomId, principal);
@@ -328,8 +344,8 @@ export class LocalNode {
   requireOwner(principal: Principal) { if (principal.kind !== 'owner' || principal.participantId !== this.catalog.ownerId) throw new NodeError(403, 'This action requires the local human session.'); }
   descriptor(roomId: unknown, peerKey: string): RoomDescriptor {
     const room = this.requireRoom(roomId, this.owner);
-    return { version: 1, roomId: room.id, peerKey, participants: room.participantIds.map(id => this.person(id))
-      .filter(p => p.state === 'local').map(({ id, name, role }) => ({ id, name, role })) };
+    return { version: 1, roomId: room.id, peerKey, machine: this.catalog.settings.machineName, participants: room.participantIds.map(id => this.person(id))
+      .filter(p => p.state === 'local').map(({ id, name, role }) => ({ id, name, role, ...(role === 'agent' ? { operatorId: this.catalog.ownerId } : {}) })) };
   }
   pairRoom(input: unknown, localKey: string) {
     this.assertReady();
@@ -338,18 +354,38 @@ export class LocalNode {
     try { descriptor = parseDescriptor(input); } catch { throw new NodeError(400, 'Invalid room pairing descriptor.'); }
     const room = this.requireRoom(descriptor.roomId, this.owner);
     if (descriptor.peerKey === localKey) throw new NodeError(400, 'Select another machine identity.');
+    const identity = (d: RoomDescriptor) => ({ version: 1, roomId: d.roomId, peerKey: d.peerKey, participants: d.participants.map(({ id, name, role }) => ({ id, name, role })) });
     if (room.peer) {
       const prior = { version: 1, roomId: room.id, peerKey: room.peer.key, participants: room.peer.participantIds.map(id => {
         const { id: participantId, name, role } = this.person(id); return { id: participantId, name, role };
       }) };
-      if (fingerprint(prior) !== fingerprint(descriptor)) throw new NodeError(409, 'This room is already paired. Changing membership requires a separate admission flow.');
+      if (fingerprint(prior) !== fingerprint(identity(descriptor))) throw new NodeError(409, 'This room is already paired. Changing membership requires a separate admission flow.');
+      // The same grant may later add operator and machine attribution, but never change an existing one.
+      const next = structuredClone(this.catalog); let changed = false;
+      for (const granted of descriptor.participants) {
+        const person = next.participants.find(p => p.id === granted.id)!;
+        if (granted.operatorId && person.operatorId !== granted.operatorId) {
+          if (person.operatorId) throw new NodeError(409, 'This agent already has a different operator.');
+          person.operatorId = granted.operatorId; changed = true;
+        }
+        if (descriptor.machine && person.machine !== descriptor.machine) {
+          if (person.machine) throw new NodeError(409, 'This participant already belongs to a different machine.');
+          person.machine = descriptor.machine; changed = true;
+        }
+      }
+      if (changed) {
+        if (!validCatalog(next)) throw new NodeError(409, 'The operator grant conflicts with existing room identities.');
+        this.saveCatalog(next);
+      }
       return { roomId: room.id };
     }
     const next = structuredClone(this.catalog), target = next.rooms.find(r => r.id === room.id)!;
     for (const person of descriptor.participants) {
       const prior = next.participants.find(p => p.id === person.id);
-      if (prior && (prior.state !== 'remote' || prior.peerKey !== descriptor.peerKey || prior.name !== person.name || prior.role !== person.role)) throw new NodeError(409, 'A participant identity conflicts with this node.');
-      if (!prior) next.participants.push({ ...person, state: 'remote', peerKey: descriptor.peerKey, detail: 'Remote room member · presence not tracked' });
+      if (prior && (prior.state !== 'remote' || prior.peerKey !== descriptor.peerKey || prior.name !== person.name || prior.role !== person.role
+        || (prior.operatorId && person.operatorId && prior.operatorId !== person.operatorId))) throw new NodeError(409, 'A participant identity conflicts with this node.');
+      if (!prior) next.participants.push({ id: person.id, name: person.name, role: person.role, state: 'remote', peerKey: descriptor.peerKey, detail: 'Remote room member · presence not tracked',
+        ...(person.operatorId ? { operatorId: person.operatorId } : {}), ...(descriptor.machine ? { machine: descriptor.machine } : {}) });
     }
     target.peer = { key: descriptor.peerKey, participantIds: descriptor.participants.map(p => p.id),
       excluded: this.histories.get(room.id)!.messages.map(m => m.id), acknowledged: [] };
@@ -421,8 +457,12 @@ export class LocalNode {
     }
     try { this.blobs.sweep(keep); } catch { /* Unreferenced bytes are retried at the next start. */ }
   }
+  /** Operator and wake policy of a local agent. Every local agent answers to this node's one human owner. */
+  private agentAuthority(room: RoomRecord, agentId: string): { operatorId: string; wake: 'anyone' | 'operator' } {
+    return { operatorId: this.catalog.ownerId, wake: room.operatorOnly?.includes(agentId) ? 'operator' : 'anyone' };
+  }
   private floorView(room: RoomRecord) {
-    const participants = room.participantIds.map(id => this.person(id));
+    const participants = room.participantIds.map(id => { const p = this.person(id); return p.role === 'agent' && p.state === 'local' ? { ...p, ...this.agentAuthority(room, id) } : p; });
     return { floor: room.floor, participants, tasks: this.boards.get(room.id)!.tasks,
       messages: this.histories.get(room.id)!.messages.map(m => ({ ...m, mentions: mentionedIds(m.text, participants) })) };
   }

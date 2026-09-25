@@ -38,7 +38,11 @@ export function useMentions(participants: Participant[], viewerId: string | unde
   const agents = participants.filter(p => p.role === 'agent');
   const options: MentionOption[] = [
     ...participants.filter(p => p.id !== viewerId).sort((a, b) => a.role === b.role ? 0 : a.role === 'agent' ? -1 : 1)
-      .map(p => ({ key: p.id, label: p.name, detail: p.role, agent: p.role === 'agent' })),
+      .map(p => {
+        const operator = participants.find(o => o.id === p.operatorId);
+        const detail = p.role === 'agent' ? operator ? `agent · ${operator.id === viewerId ? 'yours' : `${operator.name}'s`}` : 'agent' : p.machine ? `human · ${p.machine}` : 'human';
+        return { key: p.id, label: p.name, detail, agent: p.role === 'agent' };
+      }),
     ...(agents.length > 1 ? [{ key: AGENTS_MENTION, label: AGENTS_MENTION, detail: `all ${agents.length} agents`, agent: true }] : []),
   ].filter(option => !state || option.label.toLowerCase().startsWith(state.query.toLowerCase()));
   const open = !!state && options.length > 0;

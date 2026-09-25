@@ -122,6 +122,7 @@ export function createRoomTransport(demo = false): RoomTransport {
     async createRoom(input) { return (await post('rooms', { title: input.title, project: input.project })).roomId!; },
     async joinRoom(roomId) { return (await post('rooms/join', { roomId })).roomId!; },
     async setFloor(roomId, floor) { await post('rooms/floor', { roomId, floor }); },
+    async setAgentWake(roomId, agentId, wake) { await post('rooms/agent-wake', { roomId, agentId, wake }); },
     async createTask(roomId, task) { await post('tasks', { roomId, title: task.title, notes: task.notes, assigneeId: task.assigneeId }); },
     async updateTask(roomId, taskId, revision, changes) { await post('tasks/update', { roomId, taskId, revision, ...changes }); },
     async removeTask(roomId, taskId, revision) { await post('tasks/remove', { roomId, taskId, revision }); },

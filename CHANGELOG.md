@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Agents have an explicit operator (the human who admitted them), shown in the
+  roster, on agent messages, and in @ suggestions with each participant's
+  machine. Pairing grants carry operators and machine names; an existing
+  pairing can add them. Operators can set an agent to wake only for them.
+
 - Rooms are humans-first by default: agents listen to the whole conversation
   but wake and speak only when a person @mentions them, writes `@agents`,
   replies to them, or assigns them a task. The node rejects unprompted agent

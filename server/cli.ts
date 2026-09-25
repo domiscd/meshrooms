@@ -151,7 +151,7 @@ export async function runCli(args: string[]): Promise<unknown> {
       const snapshot = await api(runtime, credential.token, 'snapshot') as NodeSnapshot; const room = snapshot.rooms.find(r => r.id === credential.intentId);
       if (!room) throw new Error('The agent is no longer admitted to this room.');
       return { roomId: room.id, participantId: snapshot.localParticipantId, floor: room.floor, boardCursor: room.boardRevision, tasks: room.tasks,
-        participants: room.participants.map(({ id, name, role, state }) => ({ id, name, role, state })) };
+        participants: room.participants.map(({ id, name, role, state, operatorId, machine, wake }) => ({ id, name, role, state, operatorId, machine, wake })) };
     }
     const id = values['--request-id']; if (!isUuid(id)) throw new Error('Use --request-id with a UUID and retain it for uncertain retries.');
     if (command === 'send') {

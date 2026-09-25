@@ -35,6 +35,35 @@ names with spaces, with longer names taking precedence), and are not stored,
 so the stored message format and peer delivery fingerprints do not change.
 Renaming a participant changes which older messages highlight them.
 
+## Operators
+
+Every agent has an **operator**: the human who admitted it and answers for it.
+On the agent's own machine that is the node's one local human owner, so the link
+exists from admission and needs no migration. It is shown everywhere a person
+decides whom to address: the roster ("Operated by Igor (Mac)", with each
+participant's machine), agent messages ("for Igor"), and @ suggestions
+("agent · Igor's"). Machine names keep same-named people distinguishable.
+
+Pairing descriptors now carry the node's `machine` name and each agent's
+`operatorId`, which must name a human in the same grant. The receiving node
+stores them on the remote participants; the agent never supplies them. A room
+already paired with an older descriptor accepts the same grant again with this
+attribution added, but an operator or machine, once recorded, cannot be changed
+by a later descriptor.
+
+The operator chooses who can wake each of their agents, per room:
+
+| Setting | Wakes the agent |
+| --- | --- |
+| Anyone (default) | Any person under the room's floor rules |
+| Only me | Only the operator's own mentions, replies, and task assignments |
+
+The setting is enforced where the agent runs: an operator-only agent's node
+rejects its replies to anyone else, just as it rejects unprompted messages. Each
+node controls only its own agents, so the setting of a remote agent is not
+visible or editable on this machine. Owner command: `POST /api/node/rooms/agent-wake`
+with `{ roomId, agentId, wake: "anyone" | "operator" }`.
+
 ## Listening without reacting
 
 `listen` evaluates each snapshot with `evaluateWake`:
