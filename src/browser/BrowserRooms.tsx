@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react';
-import { mentionedIds } from '../collab';
-import { MentionText, useMentions } from '../prototype/Collaboration';
+import { mentionedIds, type Task } from '../collab';
+import { MentionText, TaskBoard, useMentions } from '../prototype/Collaboration';
 import { Wordmark } from '../prototype/RoomPrototype';
-import type { Participant } from '../room';
+import type { Participant, RoomSnapshot, TaskDraft } from '../room';
 import { BrowserApi } from './client';
 import { BrowserPeers, type SavedMessage } from './peers';
 import { identity, read, write } from './storage';
@@ -13,13 +13,14 @@ type RecentRoom = { id: string; title: string };
 const deviceLabel = /Mac/.test(navigator.userAgent) ? 'Mac browser' : /Windows/.test(navigator.userAgent) ? 'Windows browser' : 'Browser';
 const urlRoom = location.pathname.match(/^\/r\/([a-f0-9-]{36})$/)?.[1] || '';
 
-function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send' }) {
+function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send' | 'tasks' }) {
   const paths = {
     people: <><circle cx="9" cy="8" r="3" /><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M21 21v-3a6 6 0 0 0-3-5" /></>,
     link: <><path d="m10 14 4-4M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M16 8l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" /></>,
     close: <path d="m6 6 12 12M6 18 18 6" />,
     chat: <path d="M20 15a3 3 0 0 1-3 3H8l-5 3V6a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3Z" />,
     send: <path d="m4 12 8-8 8 8M12 4v16" />,
+    tasks: <path d="M10 6h10M10 12h10M10 18h10M4 6l1.5 1.5L8 5M4 12l1.5 1.5L8 11M4 18l1.5 1.5L8 17" />,
   };
   return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[kind]}</svg>;
 }
@@ -57,6 +58,8 @@ export function BrowserRooms() {
   const [agentName, setAgentName] = useState('');
   const [agentLink, setAgentLink] = useState<{ name: string; url: string }>();
   const [confirming, setConfirming] = useState<string>();
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [boardOpen, setBoardOpen] = useState(false);
   const composer = useRef<HTMLTextAreaElement>(null);
   const currentStatus = useRef<RoomStatus | undefined>(undefined);
   const lastRequest = useRef<JoinRequest | undefined>(undefined);
@@ -119,7 +122,7 @@ export function BrowserRooms() {
             }
           }
           setMessages(m); setConnected(c);
-        }, message => { if (!disposed) setNetwork(message); });
+        }, message => { if (!disposed) setNetwork(message); }, board => { if (!disposed) setTasks(board); });
         peers.current = engine; await engine.load();
         while (!disposed) {
           try {
@@ -231,6 +234,20 @@ export function BrowserRooms() {
       setNotice(member.id === status?.memberId ? 'You left this room.' : `${member.name} was removed from the room.`);
     });
   }
+  /** The shared TaskBoard offers "local" participants as assignees; in a browser room every member can be assigned. */
+  const boardRoom = { id: urlRoom, title, project: '', sample: false, messages: [], tasks,
+    participants: participants.map(p => ({ ...p, state: 'local' as const })) } as unknown as RoomSnapshot;
+  async function boardAction(work: (engine: BrowserPeers) => Promise<void>) {
+    setError('');
+    try { if (!peers.current) throw new Error('Room connection is not ready.'); await work(peers.current); }
+    catch (e) { setError((e as Error).message); throw e; }
+  }
+  const boardActions = {
+    create: (draft: TaskDraft & { title: string }) => boardAction(engine => engine.changeTask({ title: draft.title, notes: draft.notes, assigneeId: draft.assigneeId ?? null })),
+    update: (task: Task, changes: TaskDraft) => boardAction(engine => engine.changeTask(changes, task)),
+    remove: (task: Task) => boardAction(engine => engine.changeTask({}, task, true)),
+  };
+  const openTasks = tasks.filter(t => t.status !== 'done').length;
   const agentsOf = (member: BrowserMember) => status?.members?.filter(m => isAgent(m) && m.operatorId === member.id).length || 0;
   /** Inline confirmation for removing a person or leaving, naming the agents that go with them. */
   function confirmRemove(member: BrowserMember) {
@@ -256,7 +273,7 @@ export function BrowserRooms() {
       </> : <p className="browser-rail-intro">A shared room for your people and their agents.</p>}
       <p className="browser-rail-footer">Meshrooms by WormDB<br />Browser preview</p>
     </aside>
-    <main id="browser-main" className={`browser-main ${detailsOpen ? 'browser-details-open' : ''}`} tabIndex={-1}>
+    <main id="browser-main" className={`browser-main ${detailsOpen ? 'browser-details-open' : ''} ${boardOpen ? 'browser-board-open' : ''}`} tabIndex={-1}>
       {error && <div role="alert" className="browser-error">{error} <button onClick={() => { setError(''); if (!status) setRetry(v => v + 1); }}>{status ? 'Dismiss' : 'Retry'}</button></div>}
       {network && <p role="status" className="browser-error">{network}</p>}
       {notice && <p role="status" className="browser-notice">{notice}</p>}
@@ -283,7 +300,7 @@ export function BrowserRooms() {
         </section> : <>
           <header className="browser-room-header">
             <div className="browser-room-heading"><h1>{title}</h1><p>{people} {people === 1 ? 'person' : 'people'}{agents.length ? ` and ${agents.length} agent${agents.length === 1 ? '' : 's'}` : ''} in this room</p></div>
-            <div className="browser-room-actions"><button className="secondary" ref={detailsButton} aria-expanded={detailsOpen} aria-controls="browser-room-details" onClick={() => detailsOpen ? closeDetails() : setDetailsOpen(true)}><RoomIcon kind="people" />Room details</button><button className="primary" onClick={() => void copyInvite()}><RoomIcon kind="link" />Copy room link</button></div>
+            <div className="browser-room-actions"><button className="secondary" aria-expanded={boardOpen} aria-controls="task-board" onClick={() => { setBoardOpen(!boardOpen); setDetailsOpen(false); }}><RoomIcon kind="tasks" />Tasks{openTasks ? <span className="browser-count">{openTasks}</span> : null}</button><button className="secondary" ref={detailsButton} aria-expanded={detailsOpen} aria-controls="browser-room-details" onClick={() => { if (detailsOpen) closeDetails(); else { setDetailsOpen(true); setBoardOpen(false); } }}><RoomIcon kind="people" />Room details</button><button className="primary" onClick={() => void copyInvite()}><RoomIcon kind="link" />Copy room link</button></div>
           </header>
           <p className="sr-only" role="status">{host && status.requests?.length ? `${status.requests.length} request${status.requests.length === 1 ? '' : 's'} waiting to join. Use the join requests section to admit or decline.` : ''}</p>
           {host && !!status.requests?.length && <section className="browser-requests" aria-label="Join requests"><h2>Waiting to join <span>{status.requests.length}</span></h2>
@@ -334,6 +351,7 @@ export function BrowserRooms() {
                 <p className="browser-connection" role="status"><span className={`browser-connection-dot ${connected.length ? 'is-connected' : ''}`} aria-hidden="true" />{connected.length ? `Connected to ${connected.length} other device${connected.length === 1 ? '' : 's'}` : status.devices!.length > 1 ? 'Waiting for another device to connect' : 'You’re the first one here'}</p>
               </div>
             </div>
+            {boardOpen && <TaskBoard room={boardRoom} viewerId={status.memberId} disabled={!admitted} onClose={() => setBoardOpen(false)} actions={boardActions} />}
             <aside id="browser-room-details" className="browser-details" aria-label="Room details" hidden={!detailsOpen} onKeyDown={e => { if (e.key === 'Escape') closeDetails(); }}>
               <header className="browser-details-heading"><h2 tabIndex={-1} ref={detailsHeading}>Room details</h2><button className="browser-close" aria-label="Close room details" onClick={closeDetails}><RoomIcon kind="close" /></button></header>
               <section aria-label="People and agents in this room" className="browser-people"><h3>{agents.length ? 'People and agents' : 'People'} <span>{status.members!.length}</span></h3>

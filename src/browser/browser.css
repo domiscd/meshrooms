@@ -37,3 +37,7 @@
 .browser-confirm>div{display:flex;align-items:center;gap:16px;margin-top:8px}
 .browser-confirm .browser-text-link{margin-top:0}
 .browser-leave{display:block;margin-top:12px}
+/* Task board beside the conversation */
+.browser-workspace>.task-board{width:340px;flex-shrink:0;border-left:1px solid var(--line);overscroll-behavior:contain}
+.browser-count{display:inline-block;min-width:18px;margin-left:6px;padding:0 6px;border-radius:9px;background:var(--blue);color:#fff;font-size:11px;font-weight:700;text-align:center}
+@media(max-width:1150px){.browser-board-open .browser-conversation{display:none}.browser-workspace>.task-board{width:100%;border-left:0}}
