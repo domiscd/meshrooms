@@ -32,7 +32,7 @@ type MessageBody = { kind: 'message'; roomId: string; id: string; deviceId: stri
 type ReceiptBody = { kind: 'receipt'; roomId: string; id: string; deviceId: string };
 type Packet = { body: MessageBody | ReceiptBody; signature: string };
 type Stored = { packet: { body: MessageBody; signature: string }; targets: string[]; receipts: string[] };
-type Members = { memberId?: string; members: { id: string; name: string; role?: 'human' | 'agent'; operatorId?: string }[]; devices: { id: string; memberId: string }[] };
+type Members = { memberId?: string; members: { id: string; name: string; role?: 'human' | 'agent'; operatorId?: string; harness?: string; model?: string }[]; devices: { id: string; memberId: string }[] };
 /** A queued task change; `run` applies it to the board as it stands when signing, so the revision is current. */
 type TaskIntent = { type: 'task'; id: string; taskId: string; change: TaskChange; removed?: boolean };
 /** A stored task operation and the board cursor at which it arrived. */
