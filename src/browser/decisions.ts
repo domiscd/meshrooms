@@ -123,7 +123,8 @@ function extends_(current: DecisionBody, next: DecisionBody, room: RoomMembers, 
   if (added.length && (current.mode === 'plan-review' || added.some(o => o.addedBy !== next.memberId))) return false;
   const terms = next.question !== current.question || next.context !== current.context || next.closesAt !== current.closesAt
     || JSON.stringify(next.askAgents) !== JSON.stringify(current.askAgents) || next.state !== 'open';
-  return !terms || steward(room, current.memberId, next.memberId);
+  // Stewardship follows the creator, never whoever signed the latest revision (e.g. by adding an option).
+  return !terms || steward(room, current.createdBy, next.memberId);
 }
 
 /** People's votes so far, and whether the result can no longer change (everyone voted, or the leader can't be caught). */

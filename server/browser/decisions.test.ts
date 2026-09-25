@@ -137,3 +137,21 @@ test('votes need a decision this device holds; each member has a share of the ca
   const one = fold([open, castVote(as(igor), d, 'o1')])[0];
   expect(due(one, Date.now())).toBe(false); // one of three people can still be outvoted
 });
+
+test('stewardship stays with the creator after someone else adds an option', () => {
+  const open = openDecision({ ...as(sam), question: 'Ship today?', options: ['Yes', 'No'] });
+  const added = reviseDecision(as(igor), fold([open])[0], { addOption: 'Tomorrow' });
+  let d = fold([open, added])[0];
+  const ops: (DecisionBody | VoteBody)[] = [open, added, castVote(as(igor), d, 'o2'), castVote(as(igor), d, 'o1', '', 2), castVote(as(sam), d, 'o1')];
+  d = fold(ops)[0];
+  expect(due(d, Date.now())).toBe(true);
+  expect(fold([...ops, reviseDecision(as(sam), d, { close: true })])[0]).toMatchObject({ state: 'closed', revision: 3, outcome: { optionIds: ['o1'] } });
+  // A non-steward who added an option gains nothing: they can't withdraw it or change the question.
+  const byDom = reviseDecision(as(dom), fold([open])[0], { addOption: 'Never' });
+  const domOps = [open, byDom];
+  const withdraw = reviseDecision(as(dom), fold(domOps)[0], { withdraw: true });
+  const retitled = { ...reviseDecision(as(dom), fold(domOps)[0], {}), question: 'Something else' };
+  expect(fold([...domOps, withdraw])[0]).toMatchObject({ state: 'open', revision: 2 });
+  expect(fold([...domOps, retitled])[0].question).toBe('Ship today?');
+  expect(fold([...domOps, reviseDecision(as(sam), fold(domOps)[0], { withdraw: true })])[0].state).toBe('withdrawn');
+});
