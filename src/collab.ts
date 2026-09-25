@@ -142,3 +142,19 @@ export function evaluateWake(room: RoomView & { boardRevision?: number }, agentI
   if (addressed.length || tasks.length) return { state: 'addressed', messages: unseen, addressed, tasks, cursor: unseen.at(-1)?.id ?? after, boardCursor };
   return { state: 'waiting', messages: unseen, addressed: [], tasks: [], cursor: after, boardCursor: boardAfter };
 }
+
+/** Board filters: everyone's tasks, the viewer's, nobody's, or one member's (`member:<id>`). */
+export type TaskFilter = 'all' | 'mine' | 'unassigned' | `member:${string}`;
+export function matchesTaskFilter(task: Task, filter: TaskFilter, viewerId?: string): boolean {
+  if (filter === 'all') return true;
+  if (filter === 'mine') return !!viewerId && task.assigneeId === viewerId;
+  if (filter === 'unassigned') return !task.assigneeId;
+  return task.assigneeId === filter.slice('member:'.length);
+}
+/** Tasks by status in board order, except finished work: newest first, since boards show only the latest of it. */
+export function groupTasks(tasks: Task[], filter: TaskFilter = 'all', viewerId?: string): Record<TaskStatus, Task[]> {
+  const groups: Record<TaskStatus, Task[]> = { todo: [], doing: [], done: [] };
+  for (const task of tasks) if (matchesTaskFilter(task, filter, viewerId)) groups[task.status].push(task);
+  groups.done.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  return groups;
+}

@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
-import { AGENTS_MENTION, TASK_STATUSES, mentionSegments, type Floor, type Task, type TaskStatus } from '../collab';
+import { AGENTS_MENTION, TASK_STATUSES, groupTasks, matchesTaskFilter, mentionSegments, type Floor, type Task, type TaskFilter, type TaskStatus } from '../collab';
 import { parseMarkdown, repoRef, safeHref, type Block, type Inline, type RepoRef } from '../markdown';
 import type { Attachment, Participant, RoomSnapshot, TaskDraft } from '../room';
 
@@ -185,18 +185,59 @@ type BoardActions = {
   remove: (task: Task) => Promise<void>;
 };
 
+/** Finished tasks shown before "Show all"; boards collect many and the latest are the ones people check. */
+const DONE_PREVIEW = 10;
+/** Board width at which the statuses sit side by side as columns. */
+const WIDE_BOARD = 700;
+const DONE_KEY = 'meshrooms:board-done';
+const emptyText: Record<TaskStatus, string> = { todo: 'Nothing waiting.', doing: 'Nobody is working on a task.', done: 'No finished tasks yet.' };
+
+function Chevron({ open }: { open: boolean }) {
+  return <svg className={`board-chevron ${open ? 'open' : ''}`} width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>;
+}
+
 /** `working` names the agents currently working on each task, by task id (browser rooms report agent activity). */
 export function TaskBoard({ room, viewerId, disabled, onClose, actions, highlight, working }: { room: RoomSnapshot; viewerId?: string; disabled: boolean; onClose: () => void; actions: BoardActions; highlight?: string; working?: Record<string, string[]> }) {
   const [title, setTitle] = useState(''); const [assignee, setAssignee] = useState(''); const [busy, setBusy] = useState(false);
+  const [filter, setFilter] = useState<TaskFilter>('all');
+  const [doneOpen, setDoneOpen] = useState(() => { try { return localStorage.getItem(DONE_KEY) === 'open'; } catch { return false; } });
+  const [allDone, setAllDone] = useState(false);
+  const [wide, setWide] = useState(false);
+  const board = useCallback((node: HTMLElement | null) => {
+    if (!node) return;
+    const sizes = new ResizeObserver(() => setWide(node.offsetWidth >= WIDE_BOARD));
+    sizes.observe(node);
+    return () => sizes.disconnect();
+  }, []);
   const tasks = room.tasks || []; const local = room.participants.filter(p => p.state === 'local');
   const open = tasks.filter(t => t.status !== 'done').length;
+  const filters: { key: TaskFilter; label: string }[] = [{ key: 'all', label: 'All' }, ...(viewerId ? [{ key: 'mine' as const, label: 'Mine' }] : []), { key: 'unassigned', label: 'Unassigned' },
+    ...room.participants.filter(p => p.role === 'agent' && tasks.some(t => t.assigneeId === p.id)).map(p => ({ key: `member:${p.id}` as const, label: p.name }))];
+  // An agent's filter goes when its last task does.
+  const active = filters.some(f => f.key === filter) ? filter : 'all';
+  const groups = groupTasks(tasks, active, viewerId);
+  const openMatching = (key: TaskFilter) => tasks.filter(t => t.status !== 'done' && matchesTaskFilter(t, key, viewerId)).length;
+  // A task shown from the conversation must be on screen: drop a filter that hides it and open the finished work it is in.
+  // Its card scrolls itself into view once it renders.
+  useEffect(() => {
+    const task = tasks.find(t => t.id === highlight); if (!task) return;
+    const shown = matchesTaskFilter(task, active, viewerId) ? active : 'all';
+    if (shown !== active) setFilter('all');
+    if (task.status !== 'done') return;
+    setDoneOpen(true);
+    if (!groupTasks(tasks, shown, viewerId).done.slice(0, DONE_PREVIEW).includes(task)) setAllDone(true);
+  }, [highlight]);
+  function toggleDone() {
+    const next = !doneOpen; setDoneOpen(next);
+    try { localStorage.setItem(DONE_KEY, next ? 'open' : 'closed'); } catch { /* storage may be unavailable */ }
+  }
   async function submit(event: React.FormEvent) {
     event.preventDefault(); if (!title.trim() || busy) return; setBusy(true);
     try { await actions.create({ title: title.trim(), assigneeId: assignee || undefined }); setTitle(''); setAssignee(''); }
     catch { /* The room view reports the error; keep the draft for a retry. */ }
     finally { setBusy(false); }
   }
-  return <aside className="task-board" id="task-board" aria-labelledby="task-board-title">
+  return <aside ref={board} className={`task-board ${wide ? 'is-wide' : ''}`} id="task-board" aria-labelledby="task-board-title">
     <div className="board-heading"><div><h2 id="task-board-title">Tasks</h2><p>{open} open · {room.paired ? 'On this machine only; the paired node does not see this board.' : 'Everyone in this room can add, assign, and move tasks.'}</p></div>
       <button className="icon-button" aria-label="Close tasks" onClick={onClose}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg></button></div>
     <form className="task-add" onSubmit={submit}>
@@ -206,12 +247,23 @@ export function TaskBoard({ room, viewerId, disabled, onClose, actions, highligh
         <select id="task-assignee" value={assignee} onChange={e => setAssignee(e.target.value)}><option value="">Unassigned</option>{local.map(p => <option key={p.id} value={p.id}>{p.id === viewerId ? `${p.name} (you)` : p.name}{p.role === 'agent' ? ' · agent' : ''}</option>)}</select>
         <button className="primary" type="submit" disabled={disabled || busy || !title.trim()}>{busy ? 'Adding…' : 'Add'}</button></div>
     </form>
+    {tasks.length > 0 && <div className="board-filters" role="group" aria-label="Show tasks">{filters.map(f =>
+      <button key={f.key} aria-pressed={active === f.key} onClick={() => setFilter(f.key)}>{f.label}<span>{openMatching(f.key)}<span className="sr-only"> open</span></span></button>)}</div>}
     <div className="board-columns">{TASK_STATUSES.map(status => {
-      const items = tasks.filter(t => t.status === status);
+      const items = groups[status], done = status === 'done';
+      // Narrow boards fold finished work away; wide ones give it a column of its own.
+      const folded = done && !wide && !doneOpen;
+      const shown = done && !allDone ? items.slice(0, DONE_PREVIEW) : items;
+      const count = <span>{items.length}</span>;
       return <section key={status} className={`board-column ${status}`} aria-labelledby={`board-${status}`}>
-        <h3 id={`board-${status}`}>{statusLabels[status]}<span>{items.length}</span></h3>
-        {items.length === 0 ? <p className="board-empty">{status === 'todo' ? 'Nothing waiting.' : status === 'doing' ? 'Nobody is working on a task.' : 'No finished tasks yet.'}</p>
-          : <ul>{items.map(task => <TaskCard key={task.id} task={task} room={room} viewerId={viewerId} disabled={disabled} actions={actions} highlighted={task.id === highlight} working={working?.[task.id]} />)}</ul>}
+        <h3 id={`board-${status}`}>{done && !wide
+          ? <button className="board-disclosure" aria-expanded={!folded} aria-controls={folded ? undefined : 'board-done-list'} onClick={toggleDone}><Chevron open={!folded} />{statusLabels[status]}{count}</button>
+          : <>{statusLabels[status]}{count}</>}</h3>
+        {!folded && <div className="board-list" id={done ? 'board-done-list' : undefined}>
+          {items.length === 0 ? <p className="board-empty">{active === 'all' ? emptyText[status] : 'None match this filter.'}</p>
+            : <ul>{shown.map(task => <TaskCard key={task.id} task={task} room={room} viewerId={viewerId} disabled={disabled} actions={actions} highlighted={task.id === highlight} working={working?.[task.id]} />)}</ul>}
+          {done && items.length > DONE_PREVIEW && <button className="board-more" onClick={() => setAllDone(!allDone)}>{allDone ? 'Show recent only' : `Show all ${items.length}`}</button>}
+        </div>}
       </section>;
     })}</div>
   </aside>;
@@ -223,7 +275,7 @@ function TaskCard({ task, room, viewerId, disabled, actions, highlighted, workin
     if (!highlighted) return;
     card.current?.scrollIntoView({ block: 'nearest' }); card.current?.querySelector<HTMLButtonElement>('.task-title')?.focus({ preventScroll: true });
   }, [highlighted]);
-  const [expanded, setExpanded] = useState(false); const [notes, setNotes] = useState<string | null>(null); const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState(false); const [notesOpen, setNotesOpen] = useState(false); const [notes, setNotes] = useState<string | null>(null); const [busy, setBusy] = useState(false);
   const name = (id?: string) => id === viewerId ? 'You' : room.participants.find(p => p.id === id)?.name || 'Former member';
   const assignee = room.participants.find(p => p.id === task.assigneeId);
   const local = room.participants.filter(p => p.state === 'local');
@@ -237,10 +289,11 @@ function TaskCard({ task, room, viewerId, disabled, actions, highlighted, workin
         : <button className="task-advance" disabled={lock} onClick={() => run(() => actions.update(task, { status: 'todo' }))}>Reopen</button>}
     </div>
     <div className="task-meta">
-      {assignee ? <span className={`task-assignee ${assignee.role}`}>{assignee.id === viewerId ? 'You' : assignee.name}{assignee.role === 'agent' && <span className="role-label">agent</span>}</span> : <span className="task-assignee none">Unassigned</span>}
-      {task.notes && !expanded && <span className="task-has-notes">Notes</span>}
+      {assignee ? <span className={`task-assignee ${assignee.role}`}><span className={`mention-avatar ${assignee.role === 'agent' ? 'agent' : ''}`} aria-hidden="true">{assignee.name.slice(0, 1).toUpperCase()}</span>{assignee.id === viewerId ? 'You' : assignee.name}{assignee.role === 'agent' && <span className="role-label">agent</span>}</span> : <span className="task-assignee none">Unassigned</span>}
       {!!working?.length && <span className="task-working">{working.join(', ')} working</span>}
+      {task.notes && !expanded && <button className="task-notes-toggle" aria-expanded={notesOpen} onClick={() => setNotesOpen(!notesOpen)}>Notes<Chevron open={notesOpen} /></button>}
     </div>
+    {notesOpen && task.notes && !expanded && <p className="task-notes">{task.notes}</p>}
     {expanded && <div className="task-details">
       <label>Assignee<select value={task.assigneeId || ''} disabled={lock} onChange={e => run(() => actions.update(task, { assigneeId: e.target.value || null }))}><option value="">Unassigned</option>{local.map(p => <option key={p.id} value={p.id}>{p.id === viewerId ? `${p.name} (you)` : p.name}{p.role === 'agent' ? ' · agent' : ''}</option>)}</select></label>
       <label>Status<select value={task.status} disabled={lock} onChange={e => run(() => actions.update(task, { status: e.target.value as TaskStatus }))}>{TASK_STATUSES.map(s => <option key={s} value={s}>{statusLabels[s]}</option>)}</select></label>

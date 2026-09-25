@@ -37,10 +37,24 @@
 .browser-confirm>div{display:flex;align-items:center;gap:16px;margin-top:8px}
 .browser-confirm .browser-text-link{margin-top:0}
 .browser-leave{display:block;margin-top:12px}
-/* Task board beside the conversation */
-.browser-workspace>.task-board{width:340px;flex-shrink:0;border-left:1px solid var(--line);overscroll-behavior:contain}
+/* Task board beside the conversation, at its dragged width (--board-width) within the bounds in panel.ts. */
+.browser-workspace{container-type:inline-size}
+.browser-workspace>.task-board{width:clamp(300px,var(--board-width,380px),min(70vw,100% - 360px));flex-shrink:0;border-left:1px solid var(--line);overflow-y:auto;overscroll-behavior:contain}
+.browser-rooms .task-card button,.browser-rooms .board-filters button,.browser-rooms .board-disclosure,.browser-rooms .board-more{min-height:32px}
+.board-handle{position:relative;z-index:2;flex:0 0 12px;margin-inline:-6px;cursor:col-resize;touch-action:none}
+.board-handle::before{content:"";position:absolute;inset:0 5px;transition:background-color .12s}
+.board-handle::after{content:"";position:absolute;top:50%;left:3px;width:6px;height:40px;margin-top:-20px;border-radius:3px;background:#c4cfdb;transition:background-color .12s}
+.board-handle:hover::before,.board-handle:hover::after,.board-resizing .board-handle::before,.board-resizing .board-handle::after{background:var(--blue)}
+.board-handle:focus-visible{outline:none}
+.board-handle:focus-visible::after{background:var(--blue);box-shadow:0 0 0 2px var(--paper),0 0 0 5px #5b85f2}
+.board-resizing,.board-resizing *{cursor:col-resize!important;user-select:none!important}
 .browser-count{display:inline-block;min-width:18px;margin-left:6px;padding:0 6px;border-radius:9px;background:var(--blue);color:#fff;font-size:11px;font-weight:700;text-align:center}
-@media(max-width:1150px){.browser-board-open .browser-conversation{display:none}.browser-workspace>.task-board{width:100%;border-left:0}}
+/* A conversation narrowed by the board drops the composer key hint, as on phones. */
+.browser-conversation{container-type:inline-size}
+@container(max-width:560px){.browser-key-hint{display:none}}
+/* Without room for both, the board replaces the conversation, as on phones. */
+@container(max-width:659px){.browser-board-open .browser-conversation,.board-handle{display:none}.browser-workspace>.task-board{width:100%;border-left:0}}
+@media(max-width:760px){.board-handle{display:none}}
 /* Room settings */
 .browser-settings .floor-control{margin-top:12px;flex-wrap:wrap}
 .browser-setting{display:flex;gap:10px;align-items:flex-start;margin-top:16px;font-size:12px;line-height:1.6;cursor:pointer}
@@ -81,7 +95,7 @@
 .browser-person>div>span.agent-activity-note{font-style:italic;margin-top:2px;overflow-wrap:anywhere}
 .browser-message-highlight{background:#f1f5ff;box-shadow:inset 3px 0 0 var(--blue);margin-left:-14px;padding-left:14px}
 @media(max-width:760px){.browser-message-highlight{margin-left:-10px;padding-left:10px}}
-.task-working{display:inline-flex;align-items:center;gap:5px;margin-left:auto;font-weight:600;color:#7a5510}.task-working::before{content:'';width:6px;height:6px;border-radius:50%;background:#d49423}.task-has-notes+.task-working{margin-left:0}
+.task-working{display:inline-flex;align-items:center;gap:5px;font-weight:600;color:#7a5510}.task-working::before{content:'';width:6px;height:6px;border-radius:50%;background:#d49423}
 /* Collapsible rail (desktop): an icon rail with the room names as tooltips; phones keep their top bar. */
 .browser-rail-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .browser-rail-toggle{display:inline-flex;align-items:center;justify-content:center;width:36px;min-height:36px;padding:0;border-radius:8px;color:var(--rail-secondary);background:none;flex-shrink:0}

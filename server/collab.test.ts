@@ -5,7 +5,7 @@ import { createHandler } from './http';
 import { NodeAccess } from './access';
 import { testStartupManager } from './startup';
 import { tokenHash } from './model';
-import { evaluateWake, mayAgentSpeak, mentionSegments, mentionedIds } from '../src/collab';
+import { evaluateWake, groupTasks, matchesTaskFilter, mayAgentSpeak, mentionSegments, mentionedIds, type Task } from '../src/collab';
 import type { Message } from '../src/room';
 
 const people = [
@@ -274,4 +274,21 @@ test("Copilot's review of #5: nobody on a local node may be named agents", () =>
     expect(() => node.prepareRoom({ requestId: randomUUID(), title: 'Room', agentName: 'Agents', credentialHash: 'a'.repeat(64) })).toThrow('reserved');
     expect(() => node.validateSetup({ requestId: randomUUID(), humanName: ' agents ', machineName: 'Test', startAtLogin: false })).toThrow('reserved');
   } finally { node.close(); }
+});
+
+test('board filters and groups keep open work in board order and finished work newest first', () => {
+  const task = (id: string, status: Task['status'], assigneeId?: string, minute = 0): Task => ({ id, title: id, notes: '', status, assigneeId, createdBy: 'igor', updatedBy: 'igor', updatedAt: new Date(Date.UTC(2026, 8, 25, 12, minute)).toISOString(), revision: 1 });
+  const tasks = [task('a', 'todo', 'igor'), task('b', 'doing', 'codex'), task('c', 'todo'), task('d', 'done', 'codex', 1), task('e', 'done', undefined, 9), task('f', 'done', 'igor', 5)];
+  expect(matchesTaskFilter(tasks[0], 'mine', 'igor')).toBe(true);
+  expect(matchesTaskFilter(tasks[0], 'mine', undefined)).toBe(false);
+  expect(matchesTaskFilter(tasks[2], 'mine', undefined)).toBe(false);
+  expect(matchesTaskFilter(tasks[2], 'unassigned')).toBe(true);
+  expect(matchesTaskFilter(tasks[1], 'member:codex')).toBe(true);
+  expect(matchesTaskFilter(tasks[1], 'member:grok')).toBe(false);
+  const ids = (groups: Record<string, Task[]>) => Object.fromEntries(Object.entries(groups).map(([status, list]) => [status, list.map(t => t.id)]));
+  expect(ids(groupTasks(tasks))).toEqual({ todo: ['a', 'c'], doing: ['b'], done: ['e', 'f', 'd'] });
+  expect(ids(groupTasks(tasks, 'mine', 'igor'))).toEqual({ todo: ['a'], doing: [], done: ['f'] });
+  expect(ids(groupTasks(tasks, 'unassigned', 'igor'))).toEqual({ todo: ['c'], doing: [], done: ['e'] });
+  expect(ids(groupTasks(tasks, 'member:codex', 'igor'))).toEqual({ todo: [], doing: ['b'], done: ['d'] });
+  expect(tasks.map(t => t.id)).toEqual(['a', 'b', 'c', 'd', 'e', 'f']);
 });
