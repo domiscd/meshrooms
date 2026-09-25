@@ -17,8 +17,9 @@ import { RTCPeerConnection, type RTCDataChannel } from 'werift';
 import { browserProtocol, type BrowserDevice, type Command, type RoomStatus } from '../src/browser/protocol';
 import { COMPACT_AT, compactBoard, foldBoard, MAX_TASK_OPS, syncChunks, taskBody, validTaskBody, type BoardSync, type TaskChange, type TaskPacket } from '../src/browser/board';
 import {
-  COMPACT_REACTIONS_AT, MAX_REACTION_OPS, compactReactions, foldReactions, isReactionEmoji, memberReacted,
-  reactionSyncChunks, validReactionBody, type ReactionBody, type ReactionEmoji, type ReactionPacket,
+  COMPACT_REACTIONS_AT, MAX_REACTION_KEYS_PER_MEMBER, MAX_REACTION_OPS, compactReactions, currentRevision,
+  foldReactions, isReactionEmoji, liveKeysForMember, memberReacted, reactionSyncChunks, validReactionBody,
+  type ReactionBody, type ReactionEmoji, type ReactionPacket,
 } from '../src/browser/reactions';
 import { evaluateWake, mayAgentSpeak, mentionedIds, type Floor, type Task } from '../src/collab';
 import type { Message, Participant } from '../src/room';
@@ -180,17 +181,22 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
     if (added.length) storeOps(ops, added);
   };
   const storeReactions = (ops: ReactionPacket[], added: ReactionPacket[]) => {
-    let next = [...ops, ...added];
+    const held = new Set(agent.messages().map(m => m.packet.body.id));
+    const fresh = added.filter(p => held.has(p.body.messageId));
+    if (!fresh.length) return;
+    let next = [...ops, ...fresh];
     if (next.length > COMPACT_REACTIONS_AT) next = compactReactions(next);
-    if (next.length > MAX_REACTION_OPS) next = next.slice(-MAX_REACTION_OPS);
+    // Match the browser: refuse past the cap instead of dropping live ops.
+    if (next.length > MAX_REACTION_OPS) return;
     writeJson(join(agent.dir, 'reactions.json'), next);
   };
   const acceptReactions = async (packets: unknown[]) => {
     const ops = agent.reactionOps(); const known = new Set(ops.map(p => p.body.id)); const added: ReactionPacket[] = [];
+    const held = new Set(agent.messages().map(m => m.packet.body.id));
     for (const packet of packets as ReactionPacket[]) {
       const b = packet?.body;
-      if (ops.length + added.length >= MAX_REACTION_OPS) break;
       if (!validReactionBody(b, agent.roomId) || known.has(b.id) || typeof packet.signature !== 'string') continue;
+      if (!held.has(b.messageId)) continue;
       const author = status?.devices?.find(d => d.id === b.deviceId) ?? status?.formerDevices?.find(d => d.id === b.deviceId);
       if (!author || author.memberId !== b.memberId || !await agent.verify(author.publicKey, b, packet.signature)) continue;
       known.add(b.id); added.push({ body: b, signature: packet.signature });
@@ -280,14 +286,22 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
         const ops = agent.reactionOps();
         if (!ops.some(p => p.body.id === item.id)) {
           if (agent.messages().some(m => m.packet.body.id === item.messageId)) {
+            const bodies = ops.map(p => p.body);
             const remove = memberReacted(agent.reactionChips(), item.messageId, item.emoji, status.memberId);
+            if (!remove && liveKeysForMember(bodies, status.memberId) >= MAX_REACTION_KEYS_PER_MEMBER) {
+              unlinkSync(join(outbox, file)); continue;
+            }
             const body: ReactionBody = {
               kind: 'reaction', roomId: agent.roomId, id: item.id, deviceId: identity.id, memberId: status.memberId,
-              messageId: item.messageId, emoji: item.emoji, at: Date.now(), ...(remove ? { removed: true as const } : {}),
+              messageId: item.messageId, emoji: item.emoji,
+              revision: currentRevision(bodies, item.messageId, status.memberId, item.emoji) + 1,
+              at: Date.now(), ...(remove ? { removed: true as const } : {}),
             };
             const packet = { body, signature: await agent.sign(body) };
             storeReactions(ops, [packet]);
-            for (const peer of peers.values()) if (peer.channel?.readyState === 'open') peer.channel.send(JSON.stringify(packet));
+            if (agent.reactionOps().some(p => p.body.id === item.id)) {
+              for (const peer of peers.values()) if (peer.channel?.readyState === 'open') peer.channel.send(JSON.stringify(packet));
+            }
           }
         }
         unlinkSync(join(outbox, file)); continue;

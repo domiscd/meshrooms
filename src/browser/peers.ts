@@ -1,8 +1,9 @@
 import type { Task } from '../collab';
 import { COMPACT_AT, MAX_TASK_OPS, compactBoard, foldBoard, syncChunks, taskBody, validTaskBody, type TaskChange, type TaskPacket } from './board';
 import {
-  COMPACT_REACTIONS_AT, MAX_REACTION_OPS, compactReactions, foldReactions, isReactionEmoji, memberReacted,
-  reactionSyncChunks, validReactionBody, type ReactionChip, type ReactionEmoji, type ReactionPacket,
+  COMPACT_REACTIONS_AT, MAX_REACTION_KEYS_PER_MEMBER, MAX_REACTION_OPS, compactReactions, currentRevision,
+  foldReactions, isReactionEmoji, liveKeysForMember, memberReacted, reactionSyncChunks, validReactionBody,
+  type ReactionChip, type ReactionEmoji, type ReactionPacket,
 } from './reactions';
 import { verify, type BrowserDevice, type RoomStatus } from './protocol';
 import { BrowserApi } from './client';
@@ -67,10 +68,12 @@ export class BrowserPeers {
     });
   }
   private async addReactionOps(incoming: ReactionPacket[]) {
-    const fresh = incoming.filter(op => !this.reactionOps.some(known => known.body.id === op.body.id));
+    const held = new Set(this.messages.map(m => m.packet.body.id));
+    const fresh = incoming.filter(op => !this.reactionOps.some(known => known.body.id === op.body.id) && held.has(op.body.messageId));
     if (!fresh.length) return;
     let next = [...this.reactionOps, ...fresh];
     if (next.length > COMPACT_REACTIONS_AT) next = compactReactions(next);
+    // Refuse growth past the cap so every peer keeps the same live chips (do not drop older live ops).
     if (next.length > MAX_REACTION_OPS) throw new Error('This room’s reactions log is full in this preview.');
     await write(this.reactionKey, next); this.reactionOps = next; this.notifyReactions();
   }
@@ -80,10 +83,16 @@ export class BrowserPeers {
       if (!this.status?.memberId || this.stopped) throw new Error('Join the room before reacting.');
       if (!isReactionEmoji(emoji)) throw new Error('Choose one of the room’s reaction emoji.');
       if (!this.messages.some(m => m.packet.body.id === messageId)) throw new Error('That message is not in this browser.');
+      const bodies = this.reactionOps.map(op => op.body);
       const remove = memberReacted(this.chips(), messageId, emoji, this.status.memberId);
+      if (!remove && liveKeysForMember(bodies, this.status.memberId) >= MAX_REACTION_KEYS_PER_MEMBER) {
+        throw new Error('You have too many reactions in this room. Remove some before adding more.');
+      }
       const body = {
         kind: 'reaction' as const, roomId: this.roomId, id: crypto.randomUUID(), deviceId: this.deviceId,
-        memberId: this.status.memberId, messageId, emoji, at: Date.now(), ...(remove ? { removed: true as const } : {}),
+        memberId: this.status.memberId, messageId, emoji,
+        revision: currentRevision(bodies, messageId, this.status.memberId, emoji) + 1,
+        at: Date.now(), ...(remove ? { removed: true as const } : {}),
       };
       const packet: ReactionPacket = { body, signature: await sign(body) };
       await this.addReactionOps([packet]);
@@ -95,12 +104,15 @@ export class BrowserPeers {
   private async acceptReactions(sync: { roomId?: unknown; ops?: unknown }) {
     if (sync.roomId !== this.roomId || !Array.isArray(sync.ops) || sync.ops.length > 500) return;
     const accepted: ReactionPacket[] = [];
+    const held = new Set(this.messages.map(m => m.packet.body.id));
     for (const op of sync.ops as ReactionPacket[]) {
       const author = this.status?.devices?.find(d => d.id === op?.body?.deviceId) ?? this.status?.formerDevices?.find(d => d.id === op?.body?.deviceId);
       if (!author || !validReactionBody(op.body, this.roomId) || op.body.memberId !== author.memberId || typeof op.signature !== 'string') continue;
+      if (!held.has(op.body.messageId)) continue;
       if (await verify(author.publicKey, op.body, op.signature)) accepted.push({ body: op.body, signature: op.signature });
     }
-    await this.addReactionOps(accepted);
+    try { await this.addReactionOps(accepted); }
+    catch { /* Cap full: keep the local log; peers retry on reconnect after compaction elsewhere. */ }
   }
   private sendReactions(channel: RTCDataChannel) {
     for (const chunk of reactionSyncChunks(this.roomId, this.reactionOps)) {
