@@ -50,10 +50,12 @@ peer can reach the shared port on this node's mesh IP.
 | Operator approval | Only the local human/operator starts or stops a share. Agents may prepare a preview process; they do not open MeshGuard policy without an explicit operator command. |
 | One port | At most one active share per node (first slice). |
 | One peer | Allow only the room's paired MeshGuard peer key. |
-| Visible | Room members see sharer, port, mesh URL, started-at, expires-at. |
-| Expiry | Default 30 minutes; stop clears the policy intent immediately. |
+| No broader allow | Before writing a share rule, `share` checks that no existing global/org/default-allow (or other peer allow) already admits this TCP port to anyone besides the paired peer. If a broader allow would still let an unpaired peer through, refuse with a clear error. |
+| Owned rules only | The share record stores the exact MeshGuard rule(s) it created (path + rule text). `share-stop` and expiry remove **only** those owned rules. They never delete an allow the operator wrote by hand. |
+| Visible | Room members see sharer, port, mesh URL, started-at, expires-at, and status. |
+| Expiry / stop | Intent is cleared immediately; reachability may lag until MeshGuard reloads (see statuses below). |
 | Outside the site | No preview origin on `meshrooms.wormdb.dev`. Recipients open `http://<mesh-ip>:<port>/` on their own machine. |
-| Default posture | Document that production-like nodes should run `meshguard service default deny` before relying on per-peer allows. |
+| Default posture | Production-like nodes should run `meshguard service default deny` before relying on per-peer allows. |
 
 ## Meshrooms first slice
 
@@ -61,29 +63,40 @@ Ship design + local orchestration in Meshrooms without waiting for MeshGuard
 hot-reload:
 
 1. **Share record** on the local node for a paired room: port, peer key, mesh IP,
-   started/expiry, status (`active` \| `pending-meshguard-restart` \| `stopped`).
+   started/expiry, the owned rule fingerprint(s), and status:
+   - `pending-enable` — rule written; waiting for MeshGuard restart/reload before
+     the port is reachable
+   - `active` — reload observed / operator confirmed; peer can connect
+   - `pending-disable` — stop/expiry removed the owned rule intent, but MeshGuard
+     has not reloaded yet, so the port may still work until reload
+   - `stopped` — reload complete (or never enabled); port denied again under the
+     remaining policy
 2. **CLI** (operator-facing):
    - `meshrooms share --room <id> --port <n> [--minutes 30]`
    - `meshrooms share-stop --room <id>`
    - `meshrooms share-status --room <id>`
-3. **Policy write:** append/replace the per-peer allow for that TCP port under the
-   configured MeshGuard config dir (or invoke `meshguard service allow --peer …`),
-   then set status to `pending-meshguard-restart` until the operator restarts
-   MeshGuard (or until a future hot-reload command succeeds).
+3. **Policy write:** after the broader-allow precondition passes, append the
+   per-peer allow for that TCP port (config file or `meshguard service allow
+   --peer …`), record those owned rules on the share, then set `pending-enable`
+   until MeshGuard restarts (or a future hot-reload succeeds).
 4. **Announce** the share to the paired room over the existing MeshGuard
    application channel (structured share event, not a chat impersonation). The
    other node shows it in transport/share status; a short human-visible notice
-   can mirror it once.
-5. **Stop** removes the allow intent and announces stop. Until hot-reload exists,
-   stop also remains `pending-meshguard-restart` until MeshGuard reloads.
+   can mirror it once. Announcements include the status so recipients see
+   `pending-enable` / `pending-disable` honestly.
+5. **Stop** removes only the owned rules, announces stop, and sets
+   `pending-disable` until MeshGuard reloads; then `stopped`.
 
-Do not claim the port is reachable while status is pending restart.
+Do not claim the port is reachable while status is `pending-enable`.
+Do not claim the port is closed while status is `pending-disable`.
 
 ## Recipient flow
 
-1. See the share in room/transport status: `http://10.x.x.x:4173/`.
-2. Open it in a local browser on the recipient machine (mesh routing already up).
-3. When the share stops or expires, the URL should fail closed.
+1. See the share in room/transport status: `http://10.x.x.x:4173/` plus status.
+2. Open it in a local browser on the recipient machine (mesh routing already up)
+   only when status is `active`.
+3. When the share is `pending-disable` or `stopped`, treat the URL as untrusted;
+   after MeshGuard reload under default-deny it should fail closed.
 
 ## Follow-ups (not this slice)
 
@@ -97,9 +110,13 @@ Do not claim the port is reachable while status is pending restart.
 
 1. On a paired Linux/Windows (or Linux/Linux) fixture, an operator can record a
    share for one TCP port aimed at the paired peer key.
-2. After MeshGuard restart with the new policy, the peer can fetch the preview
+2. `share` refuses when a broader existing allow would admit an unpaired peer to
+   that port.
+3. After MeshGuard restart with the new policy, the peer can fetch the preview
    over the mesh IP; an unpaired peer cannot.
-3. Stop/expiry clear the local share record and announce stop; after reload, the
-   port is denied again under default-deny.
-4. Docs state the restart limitation and the `vite preview` recommendation.
-5. No change to the browser site origin or to browser-room signaling.
+4. Stop/expiry remove only owned rules, announce stop, and show `pending-disable`
+   until reload; after reload the port is denied again under default-deny and
+   hand-written allows the operator made are still present.
+5. Docs state the restart limitation (including lag after stop) and the
+   `vite preview` recommendation.
+6. No change to the browser site origin or to browser-room signaling.
