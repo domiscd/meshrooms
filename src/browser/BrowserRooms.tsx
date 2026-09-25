@@ -310,7 +310,8 @@ export function BrowserRooms() {
     catch { setDetailsOpen(true); setNotice('Copy the room link from Room details.'); }
   }
   const readyFiles = chosen.filter(f => f.status === 'ready');
-  const canSend = !busy && chosen.every(f => f.status === 'ready') && (!!text.trim() || readyFiles.length > 0);
+  // More than MAX_MESSAGE_FILES only after a failed send brought its files back: the person removes some before sending.
+  const canSend = !busy && chosen.length <= MAX_MESSAGE_FILES && chosen.every(f => f.status === 'ready') && (!!text.trim() || readyFiles.length > 0);
   function send(event: FormEvent) {
     event.preventDefault(); if (!canSend) return;
     const draft = text, replyTo = reply ? replyId : undefined, sending = readyFiles;
@@ -323,7 +324,7 @@ export function BrowserRooms() {
       } catch (e) {
         setText(current => !draft ? current : current.trim() ? `${draft}\n${current}` : draft);
         setReplyId(current => current ?? replyTo);
-        setChosen(current => [...sending, ...current].slice(0, MAX_MESSAGE_FILES));
+        setChosen(current => [...sending, ...current]); // Files added while it was sending are kept too.
         throw e;
       }
       sending.forEach(f => f.preview && URL.revokeObjectURL(f.preview));
