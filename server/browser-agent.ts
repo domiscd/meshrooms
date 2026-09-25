@@ -6,16 +6,17 @@
  * and signed packets exactly like a browser. `listen` and `send` apply the same
  * humans-first rules as local rooms (src/collab.ts), so agents behave identically.
  *
- * State lives in a private directory (identity, messages, outbox). `run` is the only
- * process that talks to peers; `listen` reads its state and `send` queues outgoing
- * messages that `run` signs and delivers.
+ * State lives in a private directory (identity, messages, task operations, outbox). `run`
+ * is the only process that talks to peers; `listen` reads its state and `send`/`task`
+ * queue outgoing messages and task changes that `run` signs and delivers.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { RTCPeerConnection, type RTCDataChannel } from 'werift';
 import { browserProtocol, type BrowserDevice, type Command, type RoomStatus } from '../src/browser/protocol';
-import { evaluateWake, mayAgentSpeak, mentionedIds, type Floor } from '../src/collab';
+import { foldBoard, MAX_TASK_OPS, syncChunks, taskBody, validTaskBody, type BoardSync, type TaskChange, type TaskPacket } from '../src/browser/board';
+import { evaluateWake, mayAgentSpeak, mentionedIds, type Floor, type Task } from '../src/collab';
 import type { Message, Participant } from '../src/room';
 
 type Identity = { id: string; publicKey: string; privateJwk: JsonWebKey };
@@ -24,6 +25,8 @@ type ReceiptBody = { kind: 'receipt'; roomId: string; id: string; deviceId: stri
 type Packet = { body: MessageBody | ReceiptBody; signature: string };
 type Stored = { packet: { body: MessageBody; signature: string }; targets: string[]; receipts: string[] };
 type Members = { memberId?: string; members: { id: string; name: string; role?: 'human' | 'agent'; operatorId?: string }[]; devices: { id: string; memberId: string }[] };
+/** A queued task change; `run` applies it to the board as it stands when signing, so the revision is current. */
+type TaskIntent = { type: 'task'; id: string; taskId: string; change: TaskChange; removed?: boolean };
 type Peer = { pc: RTCPeerConnection; session: string; channel?: RTCDataChannel; started: number };
 
 const b64 = (bytes: ArrayBuffer | Uint8Array) => Buffer.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).toString('base64');
@@ -90,6 +93,8 @@ export class BrowserAgent {
   messages(): Stored[] { return readJson(this.path('messages.json'), []); }
   members(): Members { return readJson(this.path('members.json'), { members: [], devices: [] }); }
   settings(): { floor: Floor } { return readJson(this.path('settings.json'), { floor: 'humans-first' as Floor }); }
+  /** Verified task operations in arrival order; the board cursor is a position in this list. */
+  taskOps(): TaskPacket[] { return readJson(this.path('tasks.json'), []); }
 
   /** The room as local-room shapes, so collab.ts rules apply unchanged. */
   view() {
@@ -102,8 +107,23 @@ export class BrowserAgent {
       return { id: body.id, authorId: body.memberId, author: author?.name ?? 'Former member', role: author?.role ?? 'human', text: body.text,
         time: new Date(body.at).toISOString(), ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(mentions.length ? { mentions } : {}) };
     });
-    return { memberId, participants, messages, floor: this.settings().floor };
+    const ops = this.taskOps();
+    return { memberId, participants, messages, floor: this.settings().floor, tasks: boardTasks(ops), boardRevision: ops.length };
   }
+}
+
+/**
+ * The folded board, with assignedRevision rewritten as the board cursor at which this device received the assigning
+ * operation. Task revisions count per task, but wake cursors must count across the room, like local rooms.
+ */
+export function boardTasks(ops: TaskPacket[]): Task[] {
+  return foldBoard(ops.map(p => p.body)).map(task => {
+    if (!task.assigneeId) return task;
+    let position = 0;
+    ops.forEach((p, index) => { const b = p.body;
+      if (b.taskId === task.id && b.revision === task.assignedRevision && b.assigneeId === task.assigneeId && b.memberId === task.assignedBy) position = index + 1; });
+    return { ...task, assignedRevision: position };
+  });
 }
 
 /** Long-running peer loop: presence, signaling, data channels, storage, and outbox delivery. */
@@ -114,6 +134,20 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
   let serial: Promise<unknown> = Promise.resolve();
   const transaction = <T>(work: () => Promise<T>) => { const next = serial.then(work); serial = next.catch(() => {}); return next; };
   const save = (messages: Stored[]) => writeJson(join(agent.dir, 'messages.json'), messages);
+  const saveOps = (ops: TaskPacket[]) => writeJson(join(agent.dir, 'tasks.json'), ops);
+  /** Keep a task operation signed by a current device of its author; duplicates and a full board are ignored. */
+  const acceptOps = async (packets: unknown[]) => {
+    const ops = agent.taskOps(); const known = new Set(ops.map(p => p.body.id)); const added: TaskPacket[] = [];
+    for (const packet of packets as TaskPacket[]) {
+      const b = packet?.body;
+      if (ops.length + added.length >= MAX_TASK_OPS) break;
+      if (!validTaskBody(b, agent.roomId) || known.has(b.id) || typeof packet.signature !== 'string') continue;
+      const author = status?.devices?.find(d => d.id === b.deviceId);
+      if (!author || author.memberId !== b.memberId || !await agent.verify(author.publicKey, b, packet.signature)) continue;
+      known.add(b.id); added.push({ body: b, signature: packet.signature });
+    }
+    if (added.length) saveOps([...ops, ...added]);
+  };
 
   const flush = () => {
     const messages = agent.messages();
@@ -124,11 +158,20 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
   };
   const connectChannel = (peer: Peer, id: string, channel: RTCDataChannel) => {
     peer.channel = channel;
-    channel.stateChanged.subscribe(state => { if (state === 'open') { log(`channel open to ${id.slice(0, 8)}`); flush(); } });
+    channel.stateChanged.subscribe(state => {
+      if (state !== 'open') return;
+      log(`channel open to ${id.slice(0, 8)}`);
+      // Exchange boards so either side catches up on tasks changed while apart.
+      for (const chunk of syncChunks(agent.roomId, agent.taskOps())) channel.send(JSON.stringify(chunk));
+      flush();
+    });
     channel.onMessage.subscribe(raw => void transaction(async () => {
       const text = raw.toString(); if (text.length > 20_000 || peers.get(id) !== peer) return;
       const device = status?.devices?.find(d => d.id === id); if (!device) return;
       let packet: Packet; try { packet = JSON.parse(text); } catch { return; }
+      const sync = packet as unknown as BoardSync;
+      if (sync?.kind === 'board') { if (sync.roomId === agent.roomId && Array.isArray(sync.ops)) await acceptOps(sync.ops); return; }
+      if ((packet?.body as { kind?: string })?.kind === 'task') { await acceptOps([packet]); return; }
       const b = packet?.body;
       if (!b || b.roomId !== agent.roomId || b.deviceId !== id || typeof b.id !== 'string' || !/^[a-f0-9-]{36}$/.test(b.id)
         || typeof packet.signature !== 'string' || !await agent.verify(device.publicKey, b, packet.signature)) return;
@@ -165,8 +208,23 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
   const deliverOutbox = () => transaction(async () => {
     const outbox = join(agent.dir, 'outbox');
     for (const file of readdirSync(outbox).filter(f => f.endsWith('.json')).sort()) {
-      const item = readJson<{ id: string; text: string; replyTo?: string } | null>(join(outbox, file), null);
+      const item = readJson<{ id: string; text: string; replyTo?: string } | TaskIntent | null>(join(outbox, file), null);
       if (!item || !status?.memberId) continue;
+      if ('type' in item && item.type === 'task') {
+        const ops = agent.taskOps();
+        if (!ops.some(p => p.body.id === item.id)) {
+          const current = foldBoard(ops.map(p => p.body)).find(t => t.id === item.taskId);
+          const creating = !ops.some(p => p.body.taskId === item.taskId);
+          if (creating || current) { // A task someone removed meanwhile is not recreated by an update.
+            const body = { ...taskBody({ roomId: agent.roomId, deviceId: identity.id, memberId: status.memberId, current, taskId: item.taskId, change: item.change, removed: item.removed }), id: item.id };
+            const packet = { body, signature: await agent.sign(body) };
+            saveOps([...ops, packet]);
+            for (const peer of peers.values()) if (peer.channel?.readyState === 'open') peer.channel.send(JSON.stringify(packet));
+          }
+        }
+        unlinkSync(join(outbox, file)); continue;
+      }
+      if (!('text' in item)) continue;
       const messages = agent.messages();
       if (!messages.some(m => m.packet.body.id === item.id)) {
         const body: MessageBody = { kind: 'message', roomId: agent.roomId, id: item.id, deviceId: identity.id, memberId: status.memberId, text: item.text, at: Date.now(), ...(item.replyTo ? { replyTo: item.replyTo } : {}) };
@@ -214,14 +272,14 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
 }
 
 /** Wait until this agent is addressed in the browser room (same semantics as local `listen`). */
-export async function listenBrowser(agent: BrowserAgent, after: string | undefined, seconds: number) {
+export async function listenBrowser(agent: BrowserAgent, after: string | undefined, seconds: number, boardAfter?: number) {
   const deadline = Date.now() + seconds * 1000;
   while (true) {
     const view = agent.view(); if (!view.memberId) throw new Error('This agent is not admitted to the browser room yet.');
-    const result = evaluateWake(view, view.memberId, after, undefined);
+    const result = evaluateWake(view, view.memberId, after, boardAfter);
     if (result.state !== 'waiting') return { roomId: agent.roomId, participantId: view.memberId, floor: view.floor, ...result };
     if (Date.now() >= deadline) return { state: 'timeout', roomId: agent.roomId, participantId: view.memberId, floor: view.floor, messages: [], cursor: after,
-      observed: result.messages.filter(m => m.authorId !== view.memberId).length };
+      boardCursor: boardAfter ?? view.boardRevision, observed: result.messages.filter(m => m.authorId !== view.memberId).length };
     await Bun.sleep(500);
   }
 }
@@ -242,4 +300,35 @@ export async function sendBrowser(agent: BrowserAgent, text: string, replyTo: st
     await Bun.sleep(300);
   }
   return { messageId: id, status: agent.messages().some(m => m.packet.body.id === id) ? 'queued-for-peers' : 'queued-for-bridge' };
+}
+
+/** Queue a task change for `run` to sign and share; returns the task once it is on this device's board. */
+export async function taskBrowser(agent: BrowserAgent, input: { requestId: string; taskId?: string; revision?: number; change: TaskChange; removed?: boolean }) {
+  const view = agent.view(); if (!view.memberId) throw new Error('This agent is not admitted to the browser room yet.');
+  const { change } = input;
+  if (change.title !== undefined && (!change.title.trim() || change.title.trim().length > 120)) throw new Error('Give the task a title of up to 120 characters.');
+  if (change.notes !== undefined && change.notes.trim().length > 2000) throw new Error('Keep task notes to 2,000 characters.');
+  if (change.assigneeId && !view.participants.some(p => p.id === change.assigneeId)) throw new Error('The assignee is not a member of this room.');
+  const done = agent.taskOps().find(p => p.body.id === input.requestId);
+  // A new task takes the request id as its task id, so retrying the same request never creates a second task.
+  const taskId = input.taskId ?? input.requestId;
+  if (!done && input.taskId) {
+    const current = view.tasks.find(t => t.id === input.taskId);
+    if (!current) throw new Error('That task is not on the board. Run tasks for current task IDs.');
+    if (input.revision !== undefined && current.revision !== input.revision) throw new Error(`The task changed since you read it (now revision ${current.revision}). Read tasks again, then retry.`);
+  }
+  if (!done && !input.taskId && !change.title?.trim()) throw new Error('Use --title for the new task.');
+  if (!done) writeJson(join(agent.dir, 'outbox', `${Date.now()}-${input.requestId}.json`), { type: 'task', id: input.requestId, taskId, change, ...(input.removed ? { removed: true } : {}) } satisfies TaskIntent);
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    // Check the outbox first: `run` stores the operation before deleting the queued file.
+    const pending = readdirSync(join(agent.dir, 'outbox')).some(f => f.endsWith(`-${input.requestId}.json`));
+    const ops = agent.taskOps();
+    if (ops.some(p => p.body.id === input.requestId)) {
+      return { taskId, status: 'shared', removed: !!input.removed, task: boardTasks(ops).find(t => t.id === taskId) ?? null, boardCursor: ops.length };
+    }
+    if (!pending) return { taskId, status: 'dropped', reason: 'Someone removed the task before this change was signed.' };
+    await Bun.sleep(300);
+  }
+  return { taskId, status: 'queued-for-bridge' };
 }
