@@ -15,3 +15,20 @@
 @media(max-width:1150px){.browser-details-open .browser-conversation{display:none}.browser-details{width:100%;border:0;padding-inline:var(--room-gutter)}.browser-details>section,.browser-details>.browser-storage-note{max-width:560px}}
 @media(max-width:760px){.browser-rooms{display:block}.browser-rail{padding:16px 20px;gap:16px}.browser-rail-intro,.browser-rail-footer{display:none}.browser-main{padding:24px 20px 32px}.browser-entry{margin:24px auto}.browser-joined{display:flex;flex-direction:column}.browser-joined .browser-rail{padding:8px 20px;flex-direction:row;align-items:center;justify-content:space-between;flex-shrink:0;gap:12px}.browser-joined .browser-brand{padding:0}.browser-brand .wordmark{font-size:17px}.browser-brand svg{width:20px}.browser-room-nav,.browser-self{display:none}.browser-mobile-rooms{display:flex;align-items:center;min-height:44px;font-size:12px}.browser-joined .browser-main{flex:1}.browser-room-header{align-items:flex-start;flex-wrap:wrap;gap:16px;padding:16px 20px}.browser-room-heading{width:100%}.browser-room-header h1{font-size:21px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}.browser-room-actions{flex-wrap:wrap;width:100%}.browser-room-actions button{flex:1;padding-inline:12px}.browser-requests{padding:12px 20px}.browser-request{align-items:flex-start;flex-wrap:wrap;gap:8px}.browser-request-actions{margin-left:auto}.browser-rooms input,.browser-rooms textarea{font-size:16px}.browser-message-list{padding-top:16px}.browser-message{gap:12px}.browser-message p{font-size:14px}.browser-message header:not(.sr-only){gap:8px}.browser-message .avatar{width:28px;height:28px}.browser-day{margin-bottom:24px}.browser-compose-area{padding-top:8px}.browser-composer{padding:12px}.browser-key-hint{display:none}.browser-composer>div{justify-content:flex-end;margin-top:4px}.browser-connection{font-size:12px}.browser-empty{padding-block:24px}.browser-empty h2{font-size:20px}}
 @media(max-height:600px) and (max-width:760px){.browser-joined .browser-rail{display:none}.browser-room-header{padding-block:8px;gap:8px}.browser-room-header p{display:none}.browser-composer textarea{min-height:32px;height:40px}.browser-compose-area{padding-bottom:max(8px,env(safe-area-inset-bottom))}}
+/* Agents, mentions and replies */
+.browser-role{font-size:11px;font-weight:650;color:#435e69;background:#e6ecee;border-radius:5px;padding:1px 6px}
+.browser-operator{font-size:12px;color:var(--muted)}
+.browser-message-for-you{box-shadow:inset 3px 0 0 #9db6f3;margin-left:-14px;padding-left:14px}
+.browser-reply-button{margin-left:auto;font-size:12px;color:var(--muted);background:transparent;border:0;border-radius:6px;padding:2px 8px;min-height:28px}
+.browser-reply-button:hover,.browser-reply-button:focus-visible{color:var(--ink);background:var(--soft)}
+.browser-message .browser-reply-reference{font-size:12px;line-height:1.6;color:var(--muted);border-left:2px solid var(--line);padding-left:8px;margin:4px 0 2px}
+.browser-reply-draft{max-width:880px;margin:0 auto 8px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:var(--muted)}
+.browser-agents form,.browser-agent-link{display:grid;gap:12px;margin-top:12px}
+.browser-agents label{display:grid;gap:8px;font-weight:650}
+.browser-agents input{width:100%;font-size:12px}
+.browser-agent-link>p{font-size:12px;color:var(--muted)}
+.browser-agent-link>div{display:flex;align-items:center;gap:16px}
+.browser-agent-link .browser-text-link{margin-top:0}
+.browser-agent-waiting{font-size:12px;color:var(--muted);margin-top:8px}
+.browser-person .browser-remove{display:block;padding:4px 0 0;font-size:12px}
+@media(max-width:760px){.browser-message-for-you{margin-left:-10px;padding-left:10px}}

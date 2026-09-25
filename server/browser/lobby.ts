@@ -1,14 +1,25 @@
 import { Database } from 'bun:sqlite';
-import { createHash, createHmac } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { browserProtocol, deviceId, verify, type BrowserDevice, type BrowserMember, type JoinRequest, type RoomStatus, type Signal, type SignedCommand } from '../../src/browser/protocol';
 
-type Room = { id: string; title: string; ownerId: string; members: BrowserMember[]; devices: BrowserDevice[]; requests: JoinRequest[] };
+/** Only a hash of an agent link's token is kept; the link itself is shown once to the person who made it. */
+type StoredInvite = { tokenHash: string; operatorId: string; name: string; expiresAt: number };
+type Room = { id: string; title: string; ownerId: string; members: BrowserMember[]; devices: BrowserDevice[]; requests: JoinRequest[]; invites?: StoredInvite[] };
+const INVITE_TTL = 900_000, INVITES_PER_PERSON = 4, AGENTS_PER_OPERATOR = 4;
+const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 export class LobbyError extends Error { constructor(public status: number, message: string) { super(message); } }
 function fail(status: number, message: string): never { throw new LobbyError(status, message); }
 const uuid = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9-]{36}$/.test(v);
 function label(v: unknown, max = 80): string {
   if (typeof v !== 'string' || !v.trim() || v.trim().length > max || /[\u0000-\u001f]/.test(v)) return fail(400, 'Enter a valid name.');
   return v.trim();
+}
+/** Members from before agents existed have no role and are people. */
+function isPerson(room: Room, memberId: string) { return room.members.some(m => m.id === memberId && (m.role ?? 'human') === 'human'); }
+/** Mentions resolve by name, so an agent may not share a name with anyone in the room or another open agent link. */
+function nameAvailable(room: Room, name: string, pending: StoredInvite[] = []) {
+  const taken = [...room.members.map(m => m.name), ...pending.map(i => i.name)];
+  if (taken.some(n => n.toLowerCase() === name.toLowerCase())) fail(409, 'Someone in this room already uses that name. Choose another agent name.');
 }
 export type LobbyOptions = { origin: string; now?: () => number; stunUrls?: string[]; turnUrls?: string[]; turnSecret?: string };
 
@@ -32,7 +43,7 @@ export class BrowserLobby {
     return row ? JSON.parse(row.body) : fail(404, 'This room is unavailable. Check the invitation.');
   }
   publicRoom(id: string) { const r = this.load(id); return { roomId: r.id, title: r.title }; }
-  async execute(input: SignedCommand): Promise<RoomStatus | { roomId: string }> {
+  async execute(input: SignedCommand): Promise<RoomStatus | { roomId: string; token?: string }> {
     const c = input?.command;
     if (!c || c.protocol !== browserProtocol || c.origin !== this.options.origin || !uuid(c.id) || !uuid(c.roomId) || !Number.isSafeInteger(c.at) || Math.abs(this.now() - c.at) > 60_000 || !c.payload || typeof c.payload !== 'object' || Array.isArray(c.payload)) fail(400, 'This request has expired or is invalid. Try again.');
     if (typeof input.publicKey !== 'string' || typeof input.signature !== 'string' || !await verify(input.publicKey, c, input.signature)) fail(401, 'This device could not be authenticated.');
@@ -68,7 +79,7 @@ export class BrowserLobby {
           if (room.devices.length >= 16) fail(429, 'This room has reached its device limit.');
           if (r.kind === 'companion' && !r.linkedMemberId) fail(409, 'Confirm this device from its existing identity first.');
           const memberId = r.linkedMemberId || crypto.randomUUID();
-          if (!r.linkedMemberId) room.members.push({ id: memberId, name: r.name });
+          if (!r.linkedMemberId) room.members.push({ id: memberId, name: r.name, role: 'human' });
           room.devices.push({ ...r.device, memberId, admittedAt: this.now() });
           r.state = 'admitted'; delete r.code;
         };
@@ -88,10 +99,40 @@ export class BrowserLobby {
           }
           case 'link': {
             if (!actor) fail(403, 'Join this room from your existing device first.');
+            // Agents are participants of their own; they cannot add devices to anyone's identity.
+            if (!isPerson(room, actor.memberId)) fail(403, 'Only people can confirm devices.');
             const r = room.requests.find(r => r.kind === 'companion' && r.code === c.payload.code && r.state === 'pending' && r.expiresAt > this.now()) || fail(404, 'Device code not found or expired.');
             if (r.linkedMemberId && r.linkedMemberId !== actor.memberId) fail(409, 'That device is already linked.');
             r.linkedMemberId = actor.memberId;
             if (isHost) admit(r);
+            break;
+          }
+          case 'agent-invite': {
+            if (!actor || !isPerson(room, actor.memberId)) fail(403, 'Only people in this room can connect agents.');
+            const invites = (room.invites || []).filter(i => i.expiresAt > this.now());
+            const name = label(c.payload.name, 64);
+            nameAvailable(room, name, invites);
+            if (invites.filter(i => i.operatorId === actor.memberId).length >= INVITES_PER_PERSON) fail(429, 'You already have four unused agent links. Use one or wait for them to expire.');
+            if (room.members.filter(m => m.role === 'agent' && m.operatorId === actor.memberId).length >= AGENTS_PER_OPERATOR) fail(429, 'You already have four agents in this room.');
+            const token = randomBytes(32).toString('base64url');
+            room.invites = [...invites, { tokenHash: tokenHash(token), operatorId: actor.memberId, name, expiresAt: this.now() + INVITE_TTL }];
+            this.save(room);
+            // Deliberately no receipt: the token is returned once and never retained. A retry creates a new link.
+            return { roomId: room.id, token };
+          }
+          case 'agent-redeem': {
+            if (actor) fail(409, 'This device is already in the room.');
+            const token = c.payload.token;
+            const invites = (room.invites || []).filter(i => i.expiresAt > this.now());
+            const invite = typeof token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(token) ? invites.find(i => i.tokenHash === tokenHash(token)) : undefined;
+            if (!invite || !isPerson(room, invite.operatorId)) fail(410, 'This agent link was already used or has expired. Ask for a new one.');
+            nameAvailable(room, invite.name);
+            if (room.devices.length >= 16) fail(429, 'This room has reached its device limit.');
+            const memberId = crypto.randomUUID();
+            room.members.push({ id: memberId, name: invite.name, role: 'agent', operatorId: invite.operatorId });
+            room.devices.push({ id, publicKey: input.publicKey, label: label(c.payload.label), memberId, admittedAt: this.now() });
+            room.invites = invites.filter(i => i !== invite);
+            room.requests = room.requests.filter(r => r.device.id !== id);
             break;
           }
           case 'cancel': {
@@ -110,12 +151,21 @@ export class BrowserLobby {
           }
           case 'remove': {
             const target = room.devices.find(d => d.id === c.payload.deviceId) || fail(404, 'Device not found.');
-            if (!actor || (!isHost && actor.memberId !== target.memberId)) fail(403, 'You cannot remove this device.');
+            const operates = !!actor && room.members.some(m => m.id === target.memberId && m.role === 'agent' && m.operatorId === actor.memberId);
+            if (!actor || (!isHost && actor.memberId !== target.memberId && !operates)) fail(403, 'You cannot remove this device.');
             if (target.memberId === room.ownerId && room.devices.filter(d => d.memberId === room.ownerId).length === 1) fail(409, 'Keep at least one host device.');
+            const removed = [target];
             room.devices = room.devices.filter(d => d.id !== target.id);
-            room.members = room.members.filter(m => room.devices.some(d => d.memberId === m.id));
-            room.requests = room.requests.filter(r => r.device.id !== target.id);
-            this.presence.delete(`${room.id}:${target.id}`); this.signals.delete(`${room.id}:${target.id}`);
+            // Agents leave with their operator: an agent never stays in a room its operator has left.
+            const present = (memberId: string) => room.devices.some(d => d.memberId === memberId);
+            for (const agent of room.members.filter(m => m.role === 'agent' && m.operatorId && !present(m.operatorId))) {
+              removed.push(...room.devices.filter(d => d.memberId === agent.id));
+              room.devices = room.devices.filter(d => d.memberId !== agent.id);
+            }
+            room.members = room.members.filter(m => present(m.id));
+            room.requests = room.requests.filter(r => !removed.some(d => d.id === r.device.id));
+            if (room.invites) room.invites = room.invites.filter(i => present(i.operatorId));
+            for (const device of removed) { this.presence.delete(`${room.id}:${device.id}`); this.signals.delete(`${room.id}:${device.id}`); }
             break;
           }
           case 'signal': {
@@ -166,6 +216,8 @@ export class BrowserLobby {
     result.members = room.members.filter(m => room.devices.some(d => d.memberId === m.id));
     result.devices = room.devices.map(d => ({ ...d, session: online(d) }));
     if (actor.memberId === room.ownerId) result.requests = room.requests.filter(r => r.state === 'pending' && r.expiresAt > this.now()).map(r => { const { code, ...rest } = r; return rest; });
+    const invites = (room.invites || []).filter(i => i.operatorId === actor.memberId && i.expiresAt > this.now());
+    if (invites.length) result.agentInvites = invites.map(({ name, expiresAt }) => ({ name, expiresAt }));
     const key = `${room.id}:${id}`;
     const cursor = payload.epoch === this.epoch && typeof payload.cursor === 'number' && Number.isSafeInteger(payload.cursor) ? payload.cursor : 0;
     result.signals = (this.signals.get(key) || []).filter(s => s.targetSession === payload.session && s.seq > cursor && room.devices.some(d => d.id === s.from));

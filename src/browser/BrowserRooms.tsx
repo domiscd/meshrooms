@@ -1,9 +1,12 @@
 import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react';
+import { mentionedIds } from '../collab';
+import { MentionText, useMentions } from '../prototype/Collaboration';
 import { Wordmark } from '../prototype/RoomPrototype';
+import type { Participant } from '../room';
 import { BrowserApi } from './client';
 import { BrowserPeers, type SavedMessage } from './peers';
 import { identity, read, write } from './storage';
-import type { JoinRequest, RoomStatus } from './protocol';
+import type { BrowserMember, JoinRequest, RoomStatus } from './protocol';
 import './browser.css';
 
 type RecentRoom = { id: string; title: string };
@@ -21,6 +24,10 @@ function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send
   return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[kind]}</svg>;
 }
 
+const isAgent = (member: BrowserMember | undefined) => member?.role === 'agent';
+/** Room members in the shape the shared mention helpers expect. Members from before agents existed are people. */
+const participantsOf = (members: BrowserMember[] = []): Participant[] =>
+  members.map(m => ({ id: m.id, name: m.name, role: m.role ?? 'human', state: 'remote', detail: '', operatorId: m.operatorId }));
 const sameDay = (a: number, b: number) => new Date(a).toDateString() === new Date(b).toDateString();
 const grouped = (a: SavedMessage | undefined, b: SavedMessage) => !!a && a.packet.body.memberId === b.packet.body.memberId && sameDay(a.packet.body.at, b.packet.body.at) && b.packet.body.at - a.packet.body.at < 300_000;
 function dayLabel(at: number) {
@@ -46,6 +53,10 @@ export function BrowserRooms() {
   const [unread, setUnread] = useState(0);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [liveMessage, setLiveMessage] = useState<{ id: string; text: string }>();
+  const [replyId, setReplyId] = useState<string>();
+  const [agentName, setAgentName] = useState('');
+  const [agentLink, setAgentLink] = useState<{ name: string; url: string }>();
+  const composer = useRef<HTMLTextAreaElement>(null);
   const currentStatus = useRef<RoomStatus | undefined>(undefined);
   const lastRequest = useRef<JoinRequest | undefined>(undefined);
   const peers = useRef<BrowserPeers | null>(null);
@@ -57,6 +68,17 @@ export function BrowserRooms() {
   const host = admitted && status?.memberId === status?.ownerId;
   const self = status?.members?.find(m => m.id === status.memberId);
   const pending = status?.request?.state === 'pending';
+  const participants = participantsOf(status?.members);
+  const mentions = useMentions(participants, status?.memberId, composer, setText);
+  const agents = status?.members?.filter(isAgent) || [];
+  const people = (status?.members?.length || 0) - agents.length;
+  const reply = messages.find(m => m.packet.body.id === replyId);
+  /** "you", or the operator's name, for an agent member. */
+  const operatorOf = (member: BrowserMember | undefined) => {
+    if (!isAgent(member) || !member!.operatorId) return undefined;
+    return member!.operatorId === status?.memberId ? 'you' : status?.members?.find(m => m.id === member!.operatorId)?.name || 'a former member';
+  };
+  const nameOf = (memberId: string) => status?.members?.find(m => m.id === memberId)?.name || 'Former member';
 
   useEffect(() => {
     let disposed = false, timer: ReturnType<typeof setTimeout>, wake: (() => void) | undefined;
@@ -182,8 +204,28 @@ export function BrowserRooms() {
     catch { setDetailsOpen(true); setNotice('Copy the room link from Room details.'); }
   }
   function send(event: FormEvent) {
-    event.preventDefault(); const draft = text;
-    void act(async () => { if (!peers.current) throw new Error('Room connection is not ready.'); await peers.current.send(draft); setText(''); });
+    event.preventDefault(); const draft = text, replyTo = reply ? replyId : undefined;
+    void act(async () => { if (!peers.current) throw new Error('Room connection is not ready.'); await peers.current.send(draft, replyTo); setText(''); setReplyId(undefined); });
+  }
+  function startReply(id: string) { setReplyId(id); requestAnimationFrame(() => composer.current?.focus()); }
+  function connectAgent(event: FormEvent) {
+    event.preventDefault(); const name = agentName.trim();
+    void act(async () => {
+      // The token is shown once; the room service keeps only its hash.
+      const { token } = await api.command('agent-invite', urlRoom, { name }) as unknown as { token: string };
+      setAgentLink({ name, url: `${location.origin}/agent/${urlRoom}#${token}` }); setAgentName('');
+    });
+  }
+  async function copyAgentLink() {
+    if (!agentLink) return;
+    try { await navigator.clipboard.writeText(agentLink.url); setNotice('Agent link copied. Give it to your agent.'); }
+    catch { setNotice('Select the agent link and copy it.'); }
+  }
+  function removeAgent(member: BrowserMember) {
+    void act(async () => {
+      for (const device of status?.devices?.filter(d => d.memberId === member.id) || []) await api.command('remove', urlRoom, { deviceId: device.id });
+      setNotice(`${member.name} was removed from the room.`);
+    });
   }
 
   return <div className={`browser-rooms ${admitted ? 'browser-joined' : ''}`}>
@@ -226,7 +268,7 @@ export function BrowserRooms() {
           </>}
         </section> : <>
           <header className="browser-room-header">
-            <div className="browser-room-heading"><h1>{title}</h1><p>{status.members!.length} {status.members!.length === 1 ? 'person' : 'people'} in this room</p></div>
+            <div className="browser-room-heading"><h1>{title}</h1><p>{people} {people === 1 ? 'person' : 'people'}{agents.length ? ` and ${agents.length} agent${agents.length === 1 ? '' : 's'}` : ''} in this room</p></div>
             <div className="browser-room-actions"><button className="secondary" ref={detailsButton} aria-expanded={detailsOpen} aria-controls="browser-room-details" onClick={() => detailsOpen ? closeDetails() : setDetailsOpen(true)}><RoomIcon kind="people" />Room details</button><button className="primary" onClick={() => void copyInvite()}><RoomIcon kind="link" />Copy room link</button></div>
           </header>
           <p className="sr-only" role="status">{host && status.requests?.length ? `${status.requests.length} request${status.requests.length === 1 ? '' : 's'} waiting to join. Use the join requests section to admit or decline.` : ''}</p>
@@ -243,16 +285,23 @@ export function BrowserRooms() {
                   {!messages.length && <div className="browser-empty"><RoomIcon kind="chat" /><h2>{status.members!.length > 1 ? 'Ready for your first message' : status.requests?.length ? 'Your conversation starts here' : 'Bring someone into the room'}</h2><p>{status.members!.length > 1 ? 'Send a message below to start the conversation.' : status.requests?.length ? 'Someone is waiting to join. Admit them above to get started.' : 'Share the room link with someone, or open it on another device.'}</p></div>}
                   {messages.map((m, index) => {
                     const body = m.packet.body;
-                    const author = status.members!.find(p => p.id === body.memberId)?.name || 'Former member';
-                    const continuation = grouped(messages[index - 1], m);
+                    const member = status.members!.find(p => p.id === body.memberId);
+                    const author = member?.name || 'Former member';
+                    const target = body.replyTo ? messages.find(t => t.packet.body.id === body.replyTo)?.packet.body : undefined;
+                    const continuation = grouped(messages[index - 1], m) && !body.replyTo;
                     const next = messages[index + 1];
                     const own = body.deviceId === status.deviceId;
                     const showReceipt = own && (!next || !grouped(m, next) || m.receipts.length < m.targets.length);
+                    const forYou = body.memberId !== status.memberId && (mentionedIds(body.text, participants).includes(status.memberId!) || target?.memberId === status.memberId);
+                    const operator = operatorOf(member);
                     return <Fragment key={body.id}>
                       {(!index || !sameDay(messages[index - 1].packet.body.at, body.at)) && <div className="browser-day"><span>{dayLabel(body.at)}</span></div>}
-                      <article className={`browser-message ${continuation ? 'browser-message-continuation' : ''}`}>
-                        <span className="avatar" aria-hidden="true">{author.slice(0, 1)}</span>
-                        <div><header className={continuation ? 'sr-only' : ''}><strong>{author}</strong>{body.memberId === status.memberId && <span className="browser-author-you">you</span>}<time dateTime={new Date(body.at).toISOString()}>{new Date(body.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></header><p>{body.text}</p>
+                      <article className={`browser-message ${continuation ? 'browser-message-continuation' : ''} ${forYou ? 'browser-message-for-you' : ''} ${isAgent(member) ? 'browser-message-agent' : ''}`}>
+                        <span className={`avatar ${isAgent(member) ? 'agent' : ''}`} aria-hidden="true">{author.slice(0, 1)}</span>
+                        <div><header className={continuation ? 'sr-only' : ''}><strong>{author}</strong>{isAgent(member) && <span className="browser-role">agent</span>}{operator && <span className="browser-operator">for {operator}</span>}{body.memberId === status.memberId && <span className="browser-author-you">you</span>}<time dateTime={new Date(body.at).toISOString()}>{new Date(body.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                          <button className="browser-reply-button" aria-label={`Reply to ${own ? 'your' : `${author}’s`} message`} title="Reply" onClick={() => startReply(body.id)}>Reply</button></header>
+                          {body.replyTo && <p className="browser-reply-reference">{target ? <>Replying to <strong>{nameOf(target.memberId)}</strong>: {target.text.length > 120 ? `${target.text.slice(0, 120)}…` : target.text}</> : 'Replying to an earlier message'}</p>}
+                          <p><MentionText text={body.text} participants={participants} viewerId={status.memberId} /></p>
                           {showReceipt && <span className="browser-receipt">{m.targets.length ? `Stored on ${m.receipts.length} of ${m.targets.length} devices` : 'Saved in this browser'}</span>}
                         </div>
                       </article>
@@ -262,15 +311,32 @@ export function BrowserRooms() {
               </section>
               <div className="browser-compose-area">
                 {unread > 0 && <button className="secondary browser-unread" onClick={scrollToLatest}>Show {unread} new message{unread === 1 ? '' : 's'}</button>}
-                <form className="browser-composer" onSubmit={send}><label className="sr-only" htmlFor="browser-message">Message {title}</label><textarea id="browser-message" value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (text.trim() && !busy) send(e); } }} maxLength={4000} rows={2} placeholder={`Message ${title}`} /><div><span className="browser-key-hint">Enter to send · Shift + Enter for a new line</span><button className="primary" disabled={busy || !text.trim()}><span>Send</span><RoomIcon kind="send" /></button></div></form>
+                {mentions.list}
+                {reply && <div className="browser-reply-draft"><span>Replying to <strong>{reply.packet.body.memberId === status.memberId ? 'your message' : nameOf(reply.packet.body.memberId)}</strong></span><button className="browser-close" aria-label="Cancel reply" onClick={() => setReplyId(undefined)}><RoomIcon kind="close" /></button></div>}
+                <form className="browser-composer" onSubmit={send}><label className="sr-only" htmlFor="browser-message">Message {title}</label><textarea ref={composer} id="browser-message" value={text} {...mentions.inputProps}
+                  onChange={e => { setText(e.target.value); mentions.track(e.target.value, e.target.selectionStart); }} onSelect={e => mentions.track(e.currentTarget.value, e.currentTarget.selectionStart)} onBlur={mentions.close}
+                  onKeyDown={e => { if (mentions.onKeyDown(e)) return; if (e.key === 'Escape' && reply) { setReplyId(undefined); return; } if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (text.trim() && !busy) send(e); } }}
+                  maxLength={4000} rows={2} placeholder={agents.length ? `Message ${title} · type @ to ask an agent` : `Message ${title}`} /><div><span className="browser-key-hint">Enter to send · Shift + Enter for a new line</span><button className="primary" disabled={busy || !text.trim()}><span>Send</span><RoomIcon kind="send" /></button></div></form>
                 <p className="browser-connection" role="status"><span className={`browser-connection-dot ${connected.length ? 'is-connected' : ''}`} aria-hidden="true" />{connected.length ? `Connected to ${connected.length} other device${connected.length === 1 ? '' : 's'}` : status.devices!.length > 1 ? 'Waiting for another device to connect' : 'You’re the first one here'}</p>
               </div>
             </div>
             <aside id="browser-room-details" className="browser-details" aria-label="Room details" hidden={!detailsOpen} onKeyDown={e => { if (e.key === 'Escape') closeDetails(); }}>
               <header className="browser-details-heading"><h2 tabIndex={-1} ref={detailsHeading}>Room details</h2><button className="browser-close" aria-label="Close room details" onClick={closeDetails}><RoomIcon kind="close" /></button></header>
-              <section aria-label="People in this room" className="browser-people"><h3>People <span>{status.members!.length}</span></h3>
-                {status.members!.map(member => <div className="browser-person" key={member.id}><span className="avatar" aria-hidden="true">{member.name.slice(0, 1)}</span><div><strong>{member.name}{member.id === status.memberId ? ' (you)' : ''}</strong><span>{member.id === status.ownerId ? 'Host · ' : ''}{status.devices!.filter(d => d.memberId === member.id).length} device{status.devices!.filter(d => d.memberId === member.id).length === 1 ? '' : 's'}</span></div></div>)}
+              <section aria-label="People and agents in this room" className="browser-people"><h3>{agents.length ? 'People and agents' : 'People'} <span>{status.members!.length}</span></h3>
+                {status.members!.map(member => {
+                  const devices = status.devices!.filter(d => d.memberId === member.id).length;
+                  const removable = isAgent(member) && (host || member.operatorId === status.memberId);
+                  return <div className="browser-person" key={member.id}><span className={`avatar ${isAgent(member) ? 'agent' : ''}`} aria-hidden="true">{member.name.slice(0, 1)}</span><div><strong>{member.name}{member.id === status.memberId ? ' (you)' : ''}</strong>
+                    <span>{isAgent(member) ? `Agent · operated by ${operatorOf(member)}` : `${member.id === status.ownerId ? 'Host · ' : ''}${devices} device${devices === 1 ? '' : 's'}`}</span>
+                    {removable && <button className="browser-remove" disabled={busy} aria-label={`Remove ${member.name} from the room`} onClick={() => removeAgent(member)}>Remove agent</button>}</div></div>;
+                })}
               </section>
+              {!isAgent(self) && <section className="browser-agents"><h3>Your agents</h3><p>Connect an agent you run. It joins as its own participant, shown as operated by you, and replies when someone mentions it.</p>
+                {agentLink ? <div className="browser-agent-link"><p>Give this link to <strong>{agentLink.name}</strong>. It works once and expires in 15 minutes.</p><label className="sr-only" htmlFor="browser-agent-link">Agent link for {agentLink.name}</label><input id="browser-agent-link" readOnly value={agentLink.url} onFocus={e => e.target.select()} />
+                  <div><button className="secondary" onClick={() => void copyAgentLink()}>Copy agent link</button><button className="browser-text-link" onClick={() => setAgentLink(undefined)}>Done</button></div></div>
+                  : <form onSubmit={connectAgent}><label>Agent name<input value={agentName} onChange={e => setAgentName(e.target.value)} required maxLength={64} placeholder="Codex" autoComplete="off" /></label><button className="secondary" disabled={busy || !agentName.trim()}>Connect an agent</button></form>}
+                {status.agentInvites?.map(i => <p className="browser-agent-waiting" key={i.name}>Waiting for <strong>{i.name}</strong> to connect · link expires at {new Date(i.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>)}
+              </section>}
               <section className="browser-invite"><h3>Invite someone</h3><p>New people wait for the host’s approval.</p><label className="sr-only" htmlFor="browser-invite-link">Room invite link</label><input id="browser-invite-link" readOnly value={invite} onFocus={e => e.target.select()} /></section>
               <section className="browser-device-section"><h3>Your devices</h3><p>Join as yourself from another browser.</p>
                 <details className="browser-link-device"><summary>Add another device</summary><p>Open this room link on your other device and choose <strong>Use my existing identity</strong>. Enter its code here.</p>

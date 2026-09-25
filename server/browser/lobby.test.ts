@@ -191,3 +191,98 @@ test('signaling is scoped to admitted devices, current sessions and the coordina
     await expect(guest.send('signal', room, { ...payload, to: h.deviceId, session: guest.session, targetSession: host.session })).rejects.toThrow('admission');
   } finally { lobby.close(); }
 });
+
+async function admitPerson(lobby: BrowserLobby, host: Awaited<ReturnType<typeof client>>, room: string, name: string, clock = () => Date.now()) {
+  const person = await client(lobby, clock);
+  await person.send('request', room, { name, label: 'Laptop', kind: 'person' });
+  await host.send('decide', room, { requestId: (await host.status(room)).requests!.find(r => r.name === name)!.id, admit: true });
+  return person;
+}
+
+test('a person connects an agent with a one-time link; it joins as its own member they operate', async () => {
+  let now = Date.now(); const lobby = new BrowserLobby(':memory:', { origin, now: () => now });
+  try {
+    const host = await client(lobby, () => now), room = crypto.randomUUID();
+    await host.send('create', room, { title: 'Work', name: 'Alex', label: 'Desktop' });
+    const sam = await admitPerson(lobby, host, room, 'Sam', () => now), pat = await admitPerson(lobby, host, room, 'Pat', () => now);
+    const stranger = await client(lobby, () => now), agent = await client(lobby, () => now), late = await client(lobby, () => now);
+    await expect(stranger.send('agent-invite', room, { name: 'Codex' })).rejects.toThrow('Only people');
+    await expect(sam.send('agent-invite', room, { name: 'pat' })).rejects.toThrow('already uses that name');
+    const { token } = await sam.send('agent-invite', room, { name: 'Codex' }) as { token: string };
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    await expect(pat.send('agent-invite', room, { name: 'codex' })).rejects.toThrow('already uses that name');
+    expect((await sam.status(room)).agentInvites).toEqual([{ name: 'Codex', expiresAt: now + 900_000 }]);
+    expect((await pat.status(room)).agentInvites).toBeUndefined();
+    await expect(agent.send('agent-redeem', room, { token: token.slice(0, -1) + (token.endsWith('A') ? 'B' : 'A'), label: 'Windows node' })).rejects.toThrow('already used or has expired');
+
+    const redeem = await agent.signed('agent-redeem', room, { token, label: 'Windows node' });
+    expect(await lobby.execute(redeem)).toEqual({ roomId: room });
+    expect(await lobby.execute(redeem)).toEqual({ roomId: room }); // an uncertain retry of the same command is safe
+    const joined = await agent.status(room), samId = (await sam.status(room)).memberId!;
+    expect(joined.members!.find(m => m.id === joined.memberId)).toMatchObject({ name: 'Codex', role: 'agent', operatorId: samId });
+    expect(joined.members!.find(m => m.id === samId)!.role).toBe('human');
+    expect(joined.members!.find(m => m.id === joined.ownerId)!.role).toBeUndefined(); // members from before agents read as people
+    expect((await sam.status(room)).agentInvites).toBeUndefined();
+    await expect(late.send('agent-redeem', room, { token, label: 'Other node' })).rejects.toThrow('already used or has expired');
+
+    const { token: stale } = await sam.send('agent-invite', room, { name: 'Grok' }) as { token: string };
+    now += 900_001;
+    await expect(late.send('agent-redeem', room, { token: stale, label: 'Linux node' })).rejects.toThrow('already used or has expired');
+
+    // Agents cannot invite agents, vouch for devices, admit anyone, or be removed by an unrelated member.
+    const tablet = await client(lobby, () => now);
+    await tablet.send('request', room, { name: 'Tablet', label: 'Tablet', kind: 'companion' });
+    await expect(agent.send('agent-invite', room, { name: 'Helper' })).rejects.toThrow('Only people');
+    await expect(agent.send('link', room, { code: (await tablet.status(room)).request!.code })).rejects.toThrow('Only people');
+    await expect(agent.send('decide', room, { requestId: (await tablet.status(room)).request!.id, admit: true })).rejects.toThrow('Only the host');
+    await expect(pat.send('remove', room, { deviceId: joined.deviceId })).rejects.toThrow('cannot remove');
+    await sam.send('remove', room, { deviceId: joined.deviceId });
+    expect((await host.status(room)).members!.map(m => m.name)).toEqual(['Alex', 'Sam', 'Pat']);
+    expect((await agent.status(room)).memberId).toBeUndefined();
+  } finally { lobby.close(); }
+});
+
+test('agent links are capped per person, and agents leave with their operator', async () => {
+  const lobby = new BrowserLobby(':memory:', { origin });
+  try {
+    const host = await client(lobby), room = crypto.randomUUID();
+    await host.send('create', room, { title: 'Work', name: 'Alex', label: 'Desktop' });
+    const sam = await admitPerson(lobby, host, room, 'Sam');
+    const hostAgent = await client(lobby), samAgent = await client(lobby);
+    const { token: vesper } = await host.send('agent-invite', room, { name: 'Vesper' }) as { token: string };
+    await hostAgent.send('agent-redeem', room, { token: vesper, label: 'Mac node' });
+    const { token: codex } = await sam.send('agent-invite', room, { name: 'Codex' }) as { token: string };
+    await samAgent.send('agent-redeem', room, { token: codex, label: 'Windows node' });
+    for (const name of ['A1', 'A2', 'A3', 'A4']) await sam.send('agent-invite', room, { name });
+    await expect(sam.send('agent-invite', room, { name: 'A5' })).rejects.toThrow('four unused agent links');
+    expect((await host.status(room)).members!.map(m => [m.name, m.role ?? 'human'])).toEqual([['Alex', 'human'], ['Sam', 'human'], ['Vesper', 'agent'], ['Codex', 'agent']]);
+
+    // The host removes Sam's only device: Sam's agent and unused links go too; the host's agent stays.
+    await host.send('remove', room, { deviceId: (await sam.status(room)).deviceId });
+    const after = await host.status(room);
+    expect(after.members!.map(m => m.name)).toEqual(['Alex', 'Vesper']);
+    expect(after.devices).toHaveLength(2);
+    expect((await samAgent.status(room)).memberId).toBeUndefined();
+    const again = await client(lobby);
+    await expect(again.send('agent-redeem', room, { token: codex, label: 'Windows node' })).rejects.toThrow('already used or has expired');
+  } finally { lobby.close(); }
+});
+
+test('the agent explainer is served per room as Markdown and escaped HTML, under the runtime policy', async () => {
+  const lobby = new BrowserLobby(':memory:', { origin });
+  try {
+    const handle = browserHandler(lobby, origin, 'dist'), host = await client(lobby), room = crypto.randomUUID();
+    expect((await handle(new Request(`${origin}/agent/${room}`))).status).toBe(404);
+    await host.send('create', room, { title: 'Work <b>', name: 'Alex', label: 'Desktop' });
+    const markdown = await handle(new Request(`${origin}/agent/${room}.md`));
+    expect(markdown.headers.get('content-type')).toContain('text/markdown');
+    const text = await markdown.text();
+    expect(text).toContain(room); expect(text).toContain(origin); expect(text).not.toContain('{{');
+    const page = await handle(new Request(`${origin}/agent/${room}`));
+    expect(page.headers.get('content-type')).toContain('text/html');
+    expect(page.headers.get('content-security-policy')).toContain("script-src 'self'");
+    const html = await page.text();
+    expect(html).toContain('<h1>Connect an agent'); expect(html).toContain(room); expect(html).not.toContain('<script');
+    expect((await handle(new Request(`${origin}/agent/${room}/../../lobby.ts`))).status).toBe(404);
+  } finally { lobby.close(); }
+});

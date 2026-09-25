@@ -2,22 +2,25 @@
 export const browserProtocol = 'meshrooms-browser-v1';
 export type Command = {
   protocol: typeof browserProtocol; origin: string; id: string; at: number;
-  action: 'create' | 'request' | 'cancel' | 'status' | 'decide' | 'link' | 'remove' | 'signal';
+  action: 'create' | 'request' | 'cancel' | 'status' | 'decide' | 'link' | 'remove' | 'signal' | 'agent-invite' | 'agent-redeem';
   roomId: string; payload: Record<string, unknown>;
 };
 export type SignedCommand = { command: Command; publicKey: string; signature: string };
 export type BrowserDevice = { id: string; publicKey: string; label: string; memberId: string; admittedAt: number };
-export type BrowserMember = { id: string; name: string };
+/** Members without a role joined before agents existed and are people. An agent's operator is the member who confirmed it. */
+export type BrowserMember = { id: string; name: string; role?: 'human' | 'agent'; operatorId?: string };
 export type JoinRequest = {
   id: string; device: BrowserDevice; name: string; kind: 'person' | 'companion';
   state: 'pending' | 'admitted' | 'declined' | 'expired'; expiresAt: number; code?: string; linkedMemberId?: string;
 };
+/** A one-time agent link a person created and has not yet been used; the token itself is never stored or returned again. */
+export type AgentInvite = { name: string; expiresAt: number };
 export type Signal = { seq: number; from: string; session: string; targetSession: string; description: RTCSessionDescriptionInit };
 export type RoomStatus = {
   roomId: string; title: string; epoch: string; hostOnline: boolean; memberId?: string; ownerId?: string;
   deviceId: string; request?: JoinRequest; requests?: JoinRequest[];
   members?: BrowserMember[]; devices?: (BrowserDevice & { session?: string })[];
-  signals?: Signal[]; iceServers?: RTCIceServer[];
+  signals?: Signal[]; iceServers?: RTCIceServer[]; agentInvites?: AgentInvite[];
 };
 export const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 export function base64(bytes: ArrayBuffer) { return btoa(String.fromCharCode(...new Uint8Array(bytes))); }

@@ -2,7 +2,9 @@ import { verify, type BrowserDevice, type RoomStatus } from './protocol';
 import { BrowserApi } from './client';
 import { read, sign, write } from './storage';
 
-type MessageBody = { kind: 'message'; roomId: string; id: string; deviceId: string; memberId: string; text: string; at: number };
+/** `replyTo` is optional so browsers from before replies keep verifying and storing these packets. */
+type MessageBody = { kind: 'message'; roomId: string; id: string; deviceId: string; memberId: string; text: string; at: number; replyTo?: string };
+const isId = (value: unknown) => typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
 type ReceiptBody = { kind: 'receipt'; roomId: string; id: string; deviceId: string };
 type Packet = { body: MessageBody | ReceiptBody; signature: string };
 export type SavedMessage = { packet: Packet & { body: MessageBody }; targets: string[]; receipts: string[] };
@@ -30,12 +32,13 @@ export class BrowserPeers {
     const added = messages.length > this.messages.length ? messages.at(-1) : undefined;
     await write(this.key, messages); this.messages = messages; this.notify(added);
   }
-  async send(text: string) {
+  async send(text: string, replyTo?: string) {
     return this.transaction(async () => {
       if (!this.status?.memberId || this.stopped) throw new Error('Join the room before sending.');
       if (!text.trim() || text.length > 4000) throw new Error('Write a message of up to 4,000 characters.');
       if (this.messages.length >= 1000) throw new Error('This preview has reached its local history limit.');
-      const body: MessageBody = { kind: 'message', roomId: this.roomId, id: crypto.randomUUID(), deviceId: this.deviceId, memberId: this.status.memberId, text: text.trim(), at: Date.now() };
+      if (replyTo !== undefined && !this.messages.some(m => m.packet.body.id === replyTo)) throw new Error('The message you replied to is not in this browser.');
+      const body: MessageBody = { kind: 'message', roomId: this.roomId, id: crypto.randomUUID(), deviceId: this.deviceId, memberId: this.status.memberId, text: text.trim(), at: Date.now(), ...(replyTo ? { replyTo } : {}) };
       const packet = { body, signature: await sign(body) };
       const saved: SavedMessage = { packet, targets: this.status.devices!.filter(d => d.id !== this.deviceId).map(d => d.id), receipts: [] };
       await this.save([...this.messages, saved]); this.flush();
@@ -67,9 +70,11 @@ export class BrowserPeers {
         let packet: Packet;
         try { packet = JSON.parse(event.data); } catch { return; }
         const b = packet?.body;
-        if (!b || b.roomId !== this.roomId || b.deviceId !== id || typeof b.id !== 'string' || !/^[a-f0-9-]{36}$/.test(b.id) || typeof packet.signature !== 'string' || !await verify(device.publicKey, b, packet.signature)) return;
+        if (!b || b.roomId !== this.roomId || b.deviceId !== id || !isId(b.id) || typeof packet.signature !== 'string' || !await verify(device.publicKey, b, packet.signature)) return;
         if (b.kind === 'message') {
           if (b.memberId !== device.memberId || typeof b.text !== 'string' || !b.text.trim() || b.text.length > 4000 || !Number.isSafeInteger(b.at) || b.at < 0 || b.at > 8_640_000_000_000_000) return;
+          // The replied-to message may predate this browser's admission, so only its form is checked.
+          if (b.replyTo !== undefined && !isId(b.replyTo)) return;
           const existing = this.messages.find(m => m.packet.body.id === b.id);
           if (existing && JSON.stringify(existing.packet.body) !== JSON.stringify(b)) return;
           if (!existing) {
