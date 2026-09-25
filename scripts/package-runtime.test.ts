@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { packageRuntime, type PackageManifest } from './package-runtime';
 import { testDirectory } from '../server/test-directory';
@@ -35,6 +35,8 @@ function createMockSourceFixture(baseDir: string) {
   writeFileSync(join(serverDir, 'node.ts'), '// mock node\n');
   writeFileSync(join(serverDir, 'http.ts'), '// mock http\n');
   writeFileSync(join(serverDir, 'instance.ts'), '// mock instance\n');
+  writeFileSync(join(serverDir, 'browser-agent.ts'), '// shipped as its own bundle\n');
+  writeFileSync(join(serverDir, 'agent-cli.ts'), '// shipped as its own bundle\n');
 
   // Excluded test & helper files in server
   writeFileSync(join(serverDir, 'daemon.test.ts'), '// should be excluded\n');
@@ -54,6 +56,7 @@ function createMockSourceFixture(baseDir: string) {
   writeFileSync(join(srcDir, 'room.ts'), '// mock room types\n');
   writeFileSync(join(srcDir, 'setup.ts'), '// mock setup types\n');
   writeFileSync(join(srcDir, 'collab.ts'), '// mock shared room logic\n');
+  writeFileSync(join(srcDir, 'attachments.ts'), '// mock shared attachment rules\n');
   mkdirSync(join(baseDir, 'skills', 'meshrooms'), { recursive: true });
   writeFileSync(join(baseDir, 'skills', 'meshrooms', 'SKILL.md'), '---\nname: meshrooms\ndescription: Start a local room.\n---\n');
   writeFileSync(join(baseDir, 'skills', 'meshrooms', 'LICENSE'), 'Test license');
@@ -81,6 +84,16 @@ function createMockSourceFixture(baseDir: string) {
 const describeWin = process.platform === 'win32' && process.arch === 'x64' ? describe : describe.skip;
 
 describeWin('Runtime Packaging (packageRuntime)', () => {
+  it("rejects a linked src/collab.ts like the other runtime inputs (Copilot's review of #5)", async () => {
+    const root = makeDir('linked-collab'), source = join(root, 'source');
+    createMockSourceFixture(source);
+    writeFileSync(join(root, 'outside.ts'), '// outside the source tree');
+    rmSync(join(source, 'src', 'collab.ts'));
+    try { symlinkSync(join(root, 'outside.ts'), join(source, 'src', 'collab.ts'), 'file'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EPERM') return; throw error; } // Needs symlink rights on Windows.
+    await expect(packageRuntime({ sourceDir: source, outputDir: join(root, 'out') })).rejects.toThrow(/cannot contain links/);
+  });
+
   it('fails honestly when required inputs are missing', async () => {
     const root = makeDir('missing-inputs');
     const outputDir = join(root, 'pkg-out');
@@ -167,6 +180,11 @@ describeWin('Runtime Packaging (packageRuntime)', () => {
     expect(existsSync(join(outputDir, 'src', 'room.ts'))).toBe(true);
     expect(existsSync(join(outputDir, 'src', 'setup.ts'))).toBe(true);
     expect(existsSync(join(outputDir, 'src', 'collab.ts'))).toBe(true);
+    // Copilot's review of #10: server/attachments.ts imports it at runtime.
+    expect(existsSync(join(outputDir, 'src', 'attachments.ts'))).toBe(true);
+    // The browser bridge ships as its own bundle, never in the local runtime.
+    expect(existsSync(join(outputDir, 'server', 'browser-agent.ts'))).toBe(false);
+    expect(existsSync(join(outputDir, 'server', 'agent-cli.ts'))).toBe(false);
     expect(existsSync(join(outputDir, 'skills', 'meshrooms', 'SKILL.md'))).toBe(true);
     expect(existsSync(join(outputDir, '.local', 'native', 'wormdb_ffi.dll'))).toBe(true);
 
@@ -215,6 +233,9 @@ describeWin('Runtime Packaging (packageRuntime)', () => {
     expect(manifest.version).toBe('0.1.0-alpha.1');
     expect(existsSync(join(result.directory, 'bun.exe'))).toBe(false);
     expect(manifest.files['LICENSE']).toBeDefined();
+    // Every runtime source is covered by the release hashes (Copilot on #10).
+    expect(manifest.files['src/attachments.ts']).toBeDefined();
+    expect(manifest.files['src/collab.ts']).toBeDefined();
     expect(manifest.files['skills/meshrooms/LICENSE']).toBeDefined();
     expect(manifest.files['THIRD_PARTY_NOTICES.md']).toBeDefined();
   });

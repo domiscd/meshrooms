@@ -19,6 +19,12 @@ function label(v: unknown, max = 80): string {
   if (typeof v !== 'string' || !v.trim() || v.trim().length > max || /[\u0000-\u001f]/.test(v)) return fail(400, 'Enter a valid name.');
   return v.trim();
 }
+/** A member name. `agents` is reserved: `@agents` addresses every agent (AGENTS_MENTION in src/collab.ts). */
+function memberName(v: unknown, max = 80): string {
+  const name = label(v, max);
+  if (name.toLowerCase() === 'agents') fail(400, '"agents" is reserved: @agents addresses every agent. Choose another name.');
+  return name;
+}
 /** Members from before agents existed have no role and are people. */
 function isPerson(room: Room, memberId: string) { return room.members.some(m => m.id === memberId && (m.role ?? 'human') === 'human'); }
 /** Mentions resolve by name, so an agent may not share a name with anyone in the room or another open agent link. */
@@ -77,7 +83,7 @@ export class BrowserLobby {
         if (existing) fail(409, 'This room already exists.');
         const memberId = crypto.randomUUID();
         const room: Room = { id: c.roomId, title: label(c.payload.title), ownerId: memberId,
-          members: [{ id: memberId, name: label(c.payload.name) }],
+          members: [{ id: memberId, name: memberName(c.payload.name) }],
           devices: [{ id, publicKey: input.publicKey, label: label(c.payload.label), memberId, admittedAt: this.now() }], requests: [] };
         this.save(room);
       } else {
@@ -106,7 +112,7 @@ export class BrowserLobby {
             if (room.requests.length >= 16) fail(429, 'The waiting room is full. Please try again later.');
             if (!['person', 'companion'].includes(String(c.payload.kind))) fail(400, 'Choose how to join.');
             const kind = c.payload.kind as JoinRequest['kind'];
-            room.requests.push({ id: c.id, name: label(c.payload.name), kind, state: 'pending', expiresAt: this.now() + 600_000,
+            room.requests.push({ id: c.id, name: memberName(c.payload.name), kind, state: 'pending', expiresAt: this.now() + 600_000,
               device: { id, publicKey: input.publicKey, label: label(c.payload.label), memberId: '', admittedAt: 0 },
               ...(kind === 'companion' ? { code: crypto.randomUUID().replaceAll('-', '').slice(0, 16) } : {}) });
             break;
@@ -124,7 +130,7 @@ export class BrowserLobby {
           case 'agent-invite': {
             if (!actor || !isPerson(room, actor.memberId)) fail(403, 'Only people in this room can connect agents.');
             const invites = (room.invites || []).filter(i => i.expiresAt > this.now());
-            const name = label(c.payload.name, 64);
+            const name = memberName(c.payload.name, 64);
             nameAvailable(room, name, invites);
             if (invites.filter(i => i.operatorId === actor.memberId).length >= INVITES_PER_PERSON) fail(429, 'You already have four unused agent links. Use one or wait for them to expire.');
             if (room.members.filter(m => m.role === 'agent' && m.operatorId === actor.memberId).length >= AGENTS_PER_OPERATOR) fail(429, 'You already have four agents in this room.');

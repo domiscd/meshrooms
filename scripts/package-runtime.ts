@@ -49,7 +49,8 @@ export type PackageManifest = {
 };
 
 const REQUIRED_SERVER_FILES = ['daemon.ts', 'cli.ts', 'runtime.ts'];
-const EXCLUDED_SERVER_FILES = new Set(['test-directory.ts', 'mockRoom.ts']);
+// The browser-room agent bridge ships separately as dist/agent/meshrooms-agent.js; the local runtime never loads it.
+const EXCLUDED_SERVER_FILES = new Set(['test-directory.ts', 'mockRoom.ts', 'browser-agent.ts', 'agent-cli.ts']);
 
 function computeSha256(filePath: string): string {
   const content = readFileSync(filePath);
@@ -150,13 +151,15 @@ export async function packageRuntime(options: PackageOptions): Promise<PackageRe
   // Shared room logic imported at runtime by server/node.ts and server/cli.ts.
   const collabTs = join(sourceDir, 'src', 'collab.ts');
   if (!existsSync(collabTs)) throw new Error('Required shared file missing: src/collab.ts');
+  const attachmentsTs = join(sourceDir, 'src', 'attachments.ts');
+  if (!existsSync(attachmentsTs)) throw new Error('Required shared file missing: src/attachments.ts');
   const skillPath = join(sourceDir, 'skills', 'meshrooms', 'SKILL.md');
   if (!existsSync(skillPath)) throw new Error('Required skill missing: skills/meshrooms/SKILL.md');
   const metadata = JSON.parse(readFileSync(join(sourceDir, 'package.json'), 'utf8'));
   for (const required of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'skills/meshrooms/LICENSE']) {
     if (!existsSync(join(sourceDir, required))) throw new Error(`Required notice missing: ${required}`);
   }
-  for (const input of [serverDir, join(serverDir, 'persistence'), join(sourceDir, 'src'), join(sourceDir, '.local'), join(sourceDir, '.local', 'native'), join(sourceDir, 'skills'), join(sourceDir, 'skills', 'meshrooms'), roomTs, setupTs, dllPath, skillPath]) {
+  for (const input of [serverDir, join(serverDir, 'persistence'), join(sourceDir, 'src'), join(sourceDir, '.local'), join(sourceDir, '.local', 'native'), join(sourceDir, 'skills'), join(sourceDir, 'skills', 'meshrooms'), roomTs, setupTs, collabTs, attachmentsTs, dllPath, skillPath]) {
     if (existsSync(input) && lstatSync(input).isSymbolicLink()) throw new Error(`Runtime inputs cannot contain links: ${input}`);
   }
 
@@ -209,6 +212,8 @@ export async function packageRuntime(options: PackageOptions): Promise<PackageRe
   relativeFiles.push('src/room.ts');
   copyFileSync(collabTs, join(destSrcDir, 'collab.ts'));
   relativeFiles.push('src/collab.ts');
+  copyFileSync(attachmentsTs, join(destSrcDir, 'attachments.ts'));
+  relativeFiles.push('src/attachments.ts');
 
   if (existsSync(setupTs)) {
     copyFileSync(setupTs, join(destSrcDir, 'setup.ts'));

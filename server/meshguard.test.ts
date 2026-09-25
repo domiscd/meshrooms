@@ -31,3 +31,16 @@ test('real IPC rejects identity/capability mismatches and uses only the dedicate
     expect(commands.filter(c => c === 'RECV')).toHaveLength(0);
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); directory.cleanup(); }
 });
+
+test("Copilot's review of #5: a failed incoming read releases the staged transfer", async () => {
+  const transport = new MeshGuardTransport('unused', 'a'.repeat(64)) as any;
+  const commands: string[] = [], transfer = 'c'.repeat(32);
+  transport.xfer = async (command: string) => {
+    commands.push(command);
+    if (command.startsWith('XFERRECV ')) return { ok: true, id: transfer, sender: 'b'.repeat(64), sha256: 'd'.repeat(64), size: 10, meta: '' };
+    if (command.startsWith('XFERGET ')) return { ok: true, data: Buffer.alloc(20).toString('base64') }; // more bytes than announced
+    return { ok: true };
+  };
+  await expect(transport.fileTransport().nextFile()).rejects.toThrow('Invalid MeshGuard transfer read.');
+  expect(commands.at(-1)).toBe(`XFERDONE ${transfer}`);
+});

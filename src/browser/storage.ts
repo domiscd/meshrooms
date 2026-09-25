@@ -22,6 +22,16 @@ export async function write(key: string, value: unknown) {
     tx.objectStore('records').put(value, key);
   });
 }
+/** Several puts and deletes in one transaction, so a file and its index entry change together. */
+export async function update(puts: [string, unknown][], deletes: string[] = []) {
+  const tx = (await db()).transaction('records', 'readwrite');
+  return new Promise<void>((resolve, reject) => {
+    tx.oncomplete = () => resolve(); tx.onabort = tx.onerror = () => reject(new Error('Could not save in this browser. Free some site storage and retry.'));
+    const store = tx.objectStore('records');
+    for (const [key, value] of puts) store.put(value, key);
+    for (const key of deletes) store.delete(key);
+  });
+}
 let current: Promise<Identity> | undefined;
 export function identity() {
   return current ||= (async () => {

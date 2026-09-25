@@ -1,9 +1,18 @@
-import { Fragment, useMemo, useState, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { AGENTS_MENTION, TASK_STATUSES, mentionSegments, type Floor, type Task, type TaskStatus } from '../collab';
-import { parseMarkdown, type Block, type Inline } from '../markdown';
+import { parseMarkdown, repoRef, safeHref, type Block, type Inline, type RepoRef } from '../markdown';
 import type { Attachment, Participant, RoomSnapshot, TaskDraft } from '../room';
 
 const statusLabels: Record<TaskStatus, string> = { todo: 'To do', doing: 'In progress', done: 'Done' };
+
+const refGlyphs: Record<RepoRef['kind'], ReactNode> = {
+  pull: <><circle cx="4" cy="3.5" r="1.5" /><circle cx="4" cy="12.5" r="1.5" /><circle cx="12" cy="12.5" r="1.5" /><path d="M4 5v6M12 11V7a2 2 0 0 0-2-2H7.5M9 3.5 7.5 5 9 6.5" /></>,
+  issue: <><circle cx="8" cy="8" r="6" /><circle cx="8" cy="8" r="1.2" fill="currentColor" stroke="none" /></>,
+  commit: <><circle cx="8" cy="8" r="2.5" /><path d="M1.5 8h4M10.5 8h4" /></>,
+};
+function RefIcon({ kind }: { kind: RepoRef['kind'] }) {
+  return <svg className="md-ref-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{refGlyphs[kind]}</svg>;
+}
 
 /** Message markdown with @mentions marked; mentions of the viewer are stronger. Code stays literal. */
 export function MentionText({ text, participants, viewerId }: { text: string; participants: Participant[]; viewerId?: string }) {
@@ -18,7 +27,13 @@ export function MentionText({ text, participants, viewerId }: { text: string; pa
       case 'strong': return <strong key={key}>{inline(node.children)}</strong>;
       case 'em': return <em key={key}>{inline(node.children)}</em>;
       case 'code': return <code key={key}>{node.text}</code>;
-      case 'link': return <a key={key} href={node.href} target="_blank" rel="noopener noreferrer">{inline(node.children)}</a>;
+      case 'link': {
+        const ref = repoRef(node.href);
+        if (!ref) return <a key={key} href={node.href} target="_blank" rel="noopener noreferrer">{inline(node.children)}</a>;
+        // A pasted URL becomes the short name; a link the author labeled keeps its label.
+        const bare = node.children.length === 1 && node.children[0].type === 'text' && safeHref(node.children[0].text) === node.href;
+        return <a key={key} className={`md-ref md-ref-${ref.kind}`} href={node.href} title={node.href} target="_blank" rel="noopener noreferrer"><RefIcon kind={ref.kind} />{bare ? ref.label : inline(node.children)}</a>;
+      }
       case 'br': return <br key={key} />;
     }
   });
@@ -115,13 +130,63 @@ export function useMentions(participants: Participant[], viewerId: string | unde
   } };
 }
 
+/**
+ * Keeps a conversation at its latest message while the reader is there, including when content grows after render
+ * (images, code blocks, a taller composer). Scrolling up releases it; arrivals are then counted until the reader returns.
+ */
+export function useStickToBottom(threshold = 80) {
+  const element = useRef<HTMLElement | null>(null), pinned = useRef(true), lastTop = useRef(0);
+  const [unread, setUnread] = useState(0);
+  const toBottom = useCallback(() => {
+    pinned.current = true; setUnread(0);
+    if (element.current) element.current.scrollTop = element.current.scrollHeight;
+  }, []);
+  const ref = useCallback((node: HTMLElement | null) => {
+    element.current = node; if (!node) return;
+    const follow = () => { if (pinned.current) node.scrollTop = node.scrollHeight; };
+    const sizes = new ResizeObserver(follow);
+    const watch = () => { sizes.observe(node); for (const child of node.children) sizes.observe(child); };
+    const children = new MutationObserver(() => { watch(); follow(); });
+    watch(); children.observe(node, { childList: true }); follow();
+    return () => { sizes.disconnect(); children.disconnect(); if (element.current === node) element.current = null; };
+  }, []);
+  const onScroll = useCallback(() => {
+    const el = element.current; if (!el?.clientHeight) return;
+    const distance = el.scrollHeight - el.clientHeight - el.scrollTop, up = el.scrollTop < lastTop.current;
+    lastTop.current = el.scrollTop;
+    // Only the reader moves the view up, and any upward scroll releases it, so content arriving mid-gesture never pulls
+    // them back. Scrolls that don't move up come from layout (a taller composer, new content) and keep the pin as is.
+    if (up && distance > 1) pinned.current = false;
+    else if (distance < threshold) pinned.current = true;
+    if (pinned.current) setUnread(0);
+  }, [threshold]);
+  /** Your own message always shows; others' are counted while the reader is scrolled up. */
+  const arrived = useCallback((own: boolean) => { if (own) toBottom(); else if (!pinned.current) setUnread(count => count + 1); }, [toBottom]);
+  return { ref, onScroll, toBottom, arrived, unread };
+}
+
+/** Sizes a textarea to its content; its CSS max-height caps the growth, after which it scrolls. */
+export function useAutoGrow(input: RefObject<HTMLTextAreaElement | null>, value: string) {
+  const fit = useCallback(() => {
+    const el = input.current, parent = el?.parentElement; if (!el || !parent) return;
+    // Hold the parent's height while measuring so the collapse never reaches the layout around it (and a pinned
+    // conversation's scroll position).
+    parent.style.minHeight = `${parent.offsetHeight}px`;
+    el.style.height = 'auto'; el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
+    parent.style.minHeight = '';
+  }, [input]);
+  useLayoutEffect(fit, [fit, value]);
+  useEffect(() => { addEventListener('resize', fit); return () => removeEventListener('resize', fit); }, [fit]);
+}
+
 type BoardActions = {
   create: (task: TaskDraft & { title: string }) => Promise<void>;
   update: (task: Task, changes: TaskDraft) => Promise<void>;
   remove: (task: Task) => Promise<void>;
 };
 
-export function TaskBoard({ room, viewerId, disabled, onClose, actions }: { room: RoomSnapshot; viewerId?: string; disabled: boolean; onClose: () => void; actions: BoardActions }) {
+/** `working` names the agents currently working on each task, by task id (browser rooms report agent activity). */
+export function TaskBoard({ room, viewerId, disabled, onClose, actions, highlight, working }: { room: RoomSnapshot; viewerId?: string; disabled: boolean; onClose: () => void; actions: BoardActions; highlight?: string; working?: Record<string, string[]> }) {
   const [title, setTitle] = useState(''); const [assignee, setAssignee] = useState(''); const [busy, setBusy] = useState(false);
   const tasks = room.tasks || []; const local = room.participants.filter(p => p.state === 'local');
   const open = tasks.filter(t => t.status !== 'done').length;
@@ -146,13 +211,18 @@ export function TaskBoard({ room, viewerId, disabled, onClose, actions }: { room
       return <section key={status} className={`board-column ${status}`} aria-labelledby={`board-${status}`}>
         <h3 id={`board-${status}`}>{statusLabels[status]}<span>{items.length}</span></h3>
         {items.length === 0 ? <p className="board-empty">{status === 'todo' ? 'Nothing waiting.' : status === 'doing' ? 'Nobody is working on a task.' : 'No finished tasks yet.'}</p>
-          : <ul>{items.map(task => <TaskCard key={task.id} task={task} room={room} viewerId={viewerId} disabled={disabled} actions={actions} />)}</ul>}
+          : <ul>{items.map(task => <TaskCard key={task.id} task={task} room={room} viewerId={viewerId} disabled={disabled} actions={actions} highlighted={task.id === highlight} working={working?.[task.id]} />)}</ul>}
       </section>;
     })}</div>
   </aside>;
 }
 
-function TaskCard({ task, room, viewerId, disabled, actions }: { task: Task; room: RoomSnapshot; viewerId?: string; disabled: boolean; actions: BoardActions }) {
+function TaskCard({ task, room, viewerId, disabled, actions, highlighted, working }: { task: Task; room: RoomSnapshot; viewerId?: string; disabled: boolean; actions: BoardActions; highlighted?: boolean; working?: string[] }) {
+  const card = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    if (!highlighted) return;
+    card.current?.scrollIntoView({ block: 'nearest' }); card.current?.querySelector<HTMLButtonElement>('.task-title')?.focus({ preventScroll: true });
+  }, [highlighted]);
   const [expanded, setExpanded] = useState(false); const [notes, setNotes] = useState<string | null>(null); const [busy, setBusy] = useState(false);
   const name = (id?: string) => id === viewerId ? 'You' : room.participants.find(p => p.id === id)?.name || 'Former member';
   const assignee = room.participants.find(p => p.id === task.assigneeId);
@@ -160,7 +230,7 @@ function TaskCard({ task, room, viewerId, disabled, actions }: { task: Task; roo
   async function run(action: () => Promise<void>) { setBusy(true); try { await action(); } catch { /* Reported by the room view. */ } finally { setBusy(false); } }
   const next: TaskStatus | undefined = task.status === 'todo' ? 'doing' : task.status === 'doing' ? 'done' : undefined;
   const lock = disabled || busy;
-  return <li className="task-card">
+  return <li ref={card} className={`task-card ${highlighted ? 'task-card-highlight' : ''}`}>
     <div className="task-top">
       <button className="task-title" aria-expanded={expanded} onClick={() => { setExpanded(!expanded); setNotes(null); }}>{task.title}</button>
       {next ? <button className="task-advance" disabled={lock} onClick={() => run(() => actions.update(task, { status: next }))}>{next === 'doing' ? 'Start' : 'Done'}</button>
@@ -169,6 +239,7 @@ function TaskCard({ task, room, viewerId, disabled, actions }: { task: Task; roo
     <div className="task-meta">
       {assignee ? <span className={`task-assignee ${assignee.role}`}>{assignee.id === viewerId ? 'You' : assignee.name}{assignee.role === 'agent' && <span className="role-label">agent</span>}</span> : <span className="task-assignee none">Unassigned</span>}
       {task.notes && !expanded && <span className="task-has-notes">Notes</span>}
+      {!!working?.length && <span className="task-working">{working.join(', ')} working</span>}
     </div>
     {expanded && <div className="task-details">
       <label>Assignee<select value={task.assigneeId || ''} disabled={lock} onChange={e => run(() => actions.update(task, { assigneeId: e.target.value || null }))}><option value="">Unassigned</option>{local.map(p => <option key={p.id} value={p.id}>{p.id === viewerId ? `${p.name} (you)` : p.name}{p.role === 'agent' ? ' · agent' : ''}</option>)}</select></label>
@@ -212,28 +283,38 @@ export function PendingFiles({ files, onRemove, onRetry }: { files: PendingFile[
   </li>)}</ul>;
 }
 
+/** Where an attachment's bytes are: a URL, or a note while they are not on this device yet (browser rooms fetch them from peers). */
+export type AttachmentSource = (attachment: Attachment) => { url?: string; note?: string };
+
 /** Images render inline and open full size; other files are downloads. */
-export function MessageAttachments({ roomId, attachments, author }: { roomId: string; attachments: Attachment[]; author: string }) {
+export function MessageAttachments({ roomId, attachments, author, source }: { roomId: string; attachments: Attachment[]; author: string; source?: AttachmentSource }) {
   const [open, setOpen] = useState<Attachment | null>(null);
+  const locate: AttachmentSource = source || (a => ({ url: attachmentUrl(roomId, a.id) }));
   const images = attachments.filter(a => a.kind === 'image'); const files = attachments.filter(a => a.kind !== 'image');
+  const viewing = open && locate(open).url;
   return <div className="message-attachments">
-    {images.length > 0 && <div className={`attachment-images count-${Math.min(images.length, 4)}`}>{images.map(image =>
-      <button key={image.id} className="attachment-image" onClick={() => setOpen(image)} aria-label={`Open ${image.name} from ${author}`}>
-        <img src={attachmentUrl(roomId, image.id)} alt={image.name} width={image.width} height={image.height} loading="lazy" decoding="async" />
-      </button>)}</div>}
-    {files.map(file => <a key={file.id} className="attachment-file" href={attachmentUrl(roomId, file.id)} download={file.name}>
-      <FileIcon /><span><strong>{file.name}</strong><small>{file.type === 'application/pdf' ? 'PDF' : file.type === 'text/plain' ? 'Text' : 'File'} · {formatBytes(file.size)}</small></span>
-    </a>)}
-    {open && <ImageViewer roomId={roomId} image={open} author={author} onClose={() => setOpen(null)} />}
+    {images.length > 0 && <div className={`attachment-images count-${Math.min(images.length, 4)}`}>{images.map(image => {
+      const { url, note } = locate(image);
+      return url ? <button key={image.id} className="attachment-image" onClick={() => setOpen(image)} aria-label={`Open ${image.name} from ${author}`}>
+        <img src={url} alt={image.name} width={image.width} height={image.height} loading="lazy" decoding="async" />
+      </button> : <div key={image.id} className="attachment-image attachment-waiting" role="img" aria-label={`${image.name}: ${note}`} style={image.width && image.height ? { aspectRatio: `${image.width} / ${image.height}` } : undefined}>
+        <span><strong>{image.name}</strong><small>{note}</small></span></div>;
+    })}</div>}
+    {files.map(file => {
+      const { url, note } = locate(file);
+      const label = <><FileIcon /><span><strong>{file.name}</strong><small>{note || `${file.type === 'application/pdf' ? 'PDF' : file.type === 'text/plain' ? 'Text' : 'File'} · ${formatBytes(file.size)}`}</small></span></>;
+      return url ? <a key={file.id} className="attachment-file" href={url} download={file.name}>{label}</a> : <span key={file.id} className="attachment-file attachment-waiting">{label}</span>;
+    })}
+    {open && viewing && <ImageViewer url={viewing} image={open} author={author} onClose={() => setOpen(null)} />}
   </div>;
 }
 
-function ImageViewer({ roomId, image, author, onClose }: { roomId: string; image: Attachment; author: string; onClose: () => void }) {
+function ImageViewer({ url, image, author, onClose }: { url: string; image: Attachment; author: string; onClose: () => void }) {
   return <dialog className="image-viewer" aria-label={image.name} ref={element => { if (element && !element.open) element.showModal(); }}
     onClose={onClose} onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="viewer-bar"><span><strong>{image.name}</strong><small>{author} · {image.width && image.height ? `${image.width}×${image.height} · ` : ''}{formatBytes(image.size)}</small></span>
-      <a className="secondary" href={attachmentUrl(roomId, image.id)} download={image.name}>Download</a>
+      <a className="secondary" href={url} download={image.name}>Download</a>
       <button className="icon-button" aria-label="Close image" onClick={onClose} autoFocus><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg></button></div>
-    <img src={attachmentUrl(roomId, image.id)} alt={image.name} />
+    <img src={url} alt={image.name} />
   </dialog>;
 }

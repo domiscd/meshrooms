@@ -29,6 +29,34 @@ export function safeHref(raw: string): string | undefined {
   } catch { return undefined; }
 }
 
+export type RepoRef = { kind: 'pull' | 'issue' | 'commit'; label: string };
+
+/**
+ * A short name for a GitHub or GitLab pull request, merge request, issue, or commit link. Only the real hosts qualify:
+ * the short label hides the domain, so a look-alike path on another site must keep its full URL.
+ */
+export function repoRef(href: string): RepoRef | undefined {
+  let url: URL;
+  try { url = new URL(href); } catch { return undefined; }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined;
+  const host = url.hostname.toLowerCase().replace(/^www\./, ''), parts = url.pathname.split('/').filter(Boolean);
+  const number = (value = '') => /^\d{1,9}$/.test(value), sha = (value = '') => /^[0-9a-f]{7,40}$/i.test(value);
+  if (host === 'github.com') {
+    const [owner = '', repo = '', kind, ref] = parts;
+    if (!/^[A-Za-z0-9-]{1,39}$/.test(owner) || !/^[\w.-]{1,100}$/.test(repo)) return undefined;
+    if ((kind === 'pull' || kind === 'issues') && number(ref)) return { kind: kind === 'pull' ? 'pull' : 'issue', label: `${owner}/${repo}#${ref}` };
+    if (kind === 'commit' && sha(ref)) return { kind: 'commit', label: `${repo}@${ref!.slice(0, 7).toLowerCase()}` };
+  }
+  if (host === 'gitlab.com') {
+    const dash = parts.indexOf('-'), project = parts.slice(0, dash), [kind, ref] = parts.slice(dash + 1);
+    if (dash < 2 || !project.every(part => /^[\w.-]{1,255}$/.test(part))) return undefined;
+    if (kind === 'merge_requests' && number(ref)) return { kind: 'pull', label: `${project.join('/')}!${ref}` };
+    if (kind === 'issues' && number(ref)) return { kind: 'issue', label: `${project.join('/')}#${ref}` };
+    if (kind === 'commit' && sha(ref)) return { kind: 'commit', label: `${project.at(-1)}@${ref!.slice(0, 7).toLowerCase()}` };
+  }
+  return undefined;
+}
+
 export function parseMarkdown(text: string): Block[] {
   const lines = text.replace(/\r\n?/g, '\n').split('\n').map(line => line.replace(/^\t+/, tabs => '    '.repeat(tabs.length)));
   return parseBlocks(lines, 0);

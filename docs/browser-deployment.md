@@ -29,8 +29,8 @@ files into /etc/meshrooms/turn and restarts this relay only.
 
 Build and test a clean committed revision: `bun run build`, then `bun run build:agent`
 (it writes dist/agent, so it must run after the Vite build). Package only server/browser,
-server/instance.ts, server/attachments.ts (avatar type checks), src/browser/protocol.ts,
-dist, website, deploy, and release.env.
+server/instance.ts, server/attachments.ts with src/attachments.ts (avatar and file type checks),
+src/browser/protocol.ts, dist, website, deploy, and release.env.
 Hash the archive locally and verify that hash after SSH transfer. Keep admission
 data and credentials out of the archive and web roots.
 

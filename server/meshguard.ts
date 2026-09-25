@@ -112,10 +112,15 @@ export class MeshGuardTransport implements PeerTransport {
           await this.xfer(`XFERDONE ${transfer}`); throw new Error('Invalid incoming MeshGuard transfer.');
         }
         const bytes = new Uint8Array(info.size);
-        for (let offset = 0; offset < info.size;) {
-          const chunk = Buffer.from((await this.xfer(`XFERGET ${transfer} ${offset} ${TRANSFER_IO}`)).data, 'base64');
-          if (!chunk.length || offset + chunk.length > info.size) throw new Error('Invalid MeshGuard transfer read.');
-          bytes.set(chunk, offset); offset += chunk.length;
+        try {
+          for (let offset = 0; offset < info.size;) {
+            const chunk = Buffer.from((await this.xfer(`XFERGET ${transfer} ${offset} ${TRANSFER_IO}`)).data, 'base64');
+            if (!chunk.length || offset + chunk.length > info.size) throw new Error('Invalid MeshGuard transfer read.');
+            bytes.set(chunk, offset); offset += chunk.length;
+          }
+        } catch (error) {
+          // Release the staged transfer, or it holds one of MeshGuard's few transfer slots until it expires.
+          await this.xfer(`XFERDONE ${transfer}`).catch(() => {}); throw error;
         }
         return { id: transfer, sender: info.sender, sha256: info.sha256, meta: new Uint8Array(Buffer.from(info.meta || '', 'base64')), bytes };
       },

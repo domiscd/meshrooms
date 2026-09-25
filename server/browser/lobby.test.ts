@@ -209,6 +209,10 @@ test('a person connects an agent with a one-time link; it joins as its own membe
     const stranger = await client(lobby, () => now), agent = await client(lobby, () => now), late = await client(lobby, () => now);
     await expect(stranger.send('agent-invite', room, { name: 'Codex' })).rejects.toThrow('Only people');
     await expect(sam.send('agent-invite', room, { name: 'pat' })).rejects.toThrow('already uses that name');
+    // Copilot's review of #5: "agents" is reserved for @agents, for people and agents alike.
+    await expect(sam.send('agent-invite', room, { name: 'Agents' })).rejects.toThrow('reserved');
+    await expect((await client(lobby)).send('request', room, { name: ' AGENTS ', label: 'Laptop', kind: 'person' })).rejects.toThrow('reserved');
+    await expect((await client(lobby)).send('create', crypto.randomUUID(), { title: 'Other', name: 'agents', label: 'Desktop' })).rejects.toThrow('reserved');
     const { token } = await sam.send('agent-invite', room, { name: 'Codex' }) as { token: string };
     expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     await expect(pat.send('agent-invite', room, { name: 'codex' })).rejects.toThrow('already uses that name');

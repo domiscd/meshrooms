@@ -1,10 +1,13 @@
-import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react';
-import { mentionedIds, type Task } from '../collab';
-import { FloorControl, MentionText, TaskBoard, useMentions } from '../prototype/Collaboration';
+import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { mentionedIds, type Task, type TaskStatus } from '../collab';
+import { FloorControl, MAX_MESSAGE_FILES, MAX_UPLOAD_BYTES, MentionText, MessageAttachments, PendingFiles, TaskBoard, formatBytes, uploadName, useAutoGrow, useMentions, useStickToBottom, type AttachmentSource, type PendingFile } from '../prototype/Collaboration';
 import { Wordmark } from '../prototype/RoomPrototype';
-import type { Participant, RoomSnapshot, TaskDraft } from '../room';
+import type { Attachment, Participant, RoomSnapshot, TaskDraft } from '../room';
+import { deriveActivity, duration, type ActivityRecord, type AgentActivity } from './activity';
+import { taskTimeline, type TaskBody, type TaskEvent } from './board';
 import { BrowserApi } from './client';
-import { BrowserPeers, type SavedMessage } from './peers';
+import { IMAGE_TYPES, attachmentRef, displayKind, shownText, type AttachmentRef } from './files';
+import { BrowserPeers, type FileView, type SavedMessage } from './peers';
 import { identity, read, write } from './storage';
 import { DEFAULT_ROOM_SETTINGS, base64, type BrowserMember, type JoinRequest, type RoomSettings, type RoomStatus } from './protocol';
 import './browser.css';
@@ -13,7 +16,11 @@ type RecentRoom = { id: string; title: string };
 const deviceLabel = /Mac/.test(navigator.userAgent) ? 'Mac browser' : /Windows/.test(navigator.userAgent) ? 'Windows browser' : 'Browser';
 const urlRoom = location.pathname.match(/^\/r\/([a-f0-9-]{36})$/)?.[1] || '';
 
-function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send' | 'tasks' }) {
+/** A file chosen for the next message: read and hashed here, stored only when the message is sent. */
+type ChosenFile = PendingFile & { ref?: AttachmentRef; bytes?: Uint8Array };
+const fileNames = (body: SavedMessage['packet']['body']) => body.attachments?.map(a => a.name).join(', ') || '';
+
+function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send' | 'tasks' | 'clip' | 'plus' | 'collapse' | 'expand' }) {
   const paths = {
     people: <><circle cx="9" cy="8" r="3" /><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M21 21v-3a6 6 0 0 0-3-5" /></>,
     link: <><path d="m10 14 4-4M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M16 8l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" /></>,
@@ -21,6 +28,10 @@ function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send
     chat: <path d="M20 15a3 3 0 0 1-3 3H8l-5 3V6a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3Z" />,
     send: <path d="m4 12 8-8 8 8M12 4v16" />,
     tasks: <path d="M10 6h10M10 12h10M10 18h10M4 6l1.5 1.5L8 5M4 12l1.5 1.5L8 11M4 18l1.5 1.5L8 17" />,
+    clip: <path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L14.5 7" />,
+    plus: <path d="M12 5v14M5 12h14" />,
+    collapse: <path d="m11 17-5-5 5-5M18 17l-5-5 5-5" />,
+    expand: <path d="m13 17 5-5-5-5M6 17l5-5-5-5" />,
   };
   return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[kind]}</svg>;
 }
@@ -55,6 +66,20 @@ const grouped = (a: SavedMessage | undefined, b: SavedMessage) => !!a && a.packe
 function dayLabel(at: number) {
   return sameDay(at, Date.now()) ? 'Today' : new Date(at).toLocaleDateString([], { month: 'long', day: 'numeric', year: 'numeric' });
 }
+const statusMoves: Record<TaskStatus, string> = { todo: 'back to to-do', doing: 'to in progress', done: 'to done' };
+/** "Igor assigned “Fix header” to Vesper and moved it to in progress". The title leads; later phrases say "it". */
+function describeTask(event: TaskEvent, name: (memberId: string, subject?: boolean) => string) {
+  const title = `“${event.title}”`, phrases: string[] = [], it = () => phrases.length ? 'it' : title;
+  if (event.removed) return `${name(event.memberId, true)} removed ${title}`;
+  if (event.created) phrases.push(`created ${title}`);
+  if (event.updated) phrases.push(`updated ${title}`);
+  if (event.renamedFrom !== undefined) phrases.push(`renamed “${event.renamedFrom}” to ${title}`);
+  if (event.assigneeId !== undefined) phrases.push(event.assigneeId === null ? `unassigned ${it()}` : event.assigneeId === event.memberId ? `took ${it()}` : `assigned ${it()} to ${name(event.assigneeId)}`);
+  if (event.status) phrases.push(`moved ${it()} ${statusMoves[event.status]}`);
+  if (event.notes) phrases.push(`edited the notes on ${it()}`);
+  return `${name(event.memberId, true)} ${phrases.length > 1 ? `${phrases.slice(0, -1).join(', ')} and ${phrases.at(-1)}` : phrases[0]}`;
+}
+type TranscriptItem = { message: SavedMessage; event?: undefined } | { event: TaskEvent; message?: undefined };
 
 export function BrowserRooms() {
   const [api] = useState(() => new BrowserApi());
@@ -72,7 +97,6 @@ export function BrowserRooms() {
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [retry, setRetry] = useState(0);
-  const [unread, setUnread] = useState(0);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [liveMessage, setLiveMessage] = useState<{ id: string; text: string }>();
   const [replyId, setReplyId] = useState<string>();
@@ -81,14 +105,24 @@ export function BrowserRooms() {
   const [confirming, setConfirming] = useState<string>();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [boardOpen, setBoardOpen] = useState(false);
+  const [railCollapsed, setRailCollapsed] = useState(() => { try { return localStorage.getItem('meshrooms:rail') === 'collapsed'; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem('meshrooms:rail', railCollapsed ? 'collapsed' : 'open'); } catch { /* storage may be unavailable */ } }, [railCollapsed]);
   const [avatarFor, setAvatarFor] = useState<string>();
   const avatarInput = useRef<HTMLInputElement>(null);
+  const [files, setFiles] = useState<Record<string, FileView>>({});
+  const [chosen, setChosen] = useState<ChosenFile[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [taskOps, setTaskOps] = useState<TaskBody[]>([]);
+  const [highlight, setHighlight] = useState<string>();
+  const [activity, setActivity] = useState<Record<string, ActivityRecord>>({});
+  const [now, setNow] = useState(() => Date.now());
   const composer = useRef<HTMLTextAreaElement>(null);
   const currentStatus = useRef<RoomStatus | undefined>(undefined);
   const lastRequest = useRef<JoinRequest | undefined>(undefined);
   const peers = useRef<BrowserPeers | null>(null);
   const everJoined = useRef(false);
-  const transcript = useRef<HTMLElement>(null);
+  const stick = useStickToBottom();
   const detailsHeading = useRef<HTMLHeadingElement>(null);
   const detailsButton = useRef<HTMLButtonElement>(null);
   const admitted = !!status?.memberId;
@@ -97,6 +131,7 @@ export function BrowserRooms() {
   const pending = status?.request?.state === 'pending';
   const participants = participantsOf(status?.members);
   const mentions = useMentions(participants, status?.memberId, composer, setText);
+  useAutoGrow(composer, text);
   const agents = status?.members?.filter(isAgent) || [];
   const people = (status?.members?.length || 0) - agents.length;
   const reply = messages.find(m => m.packet.body.id === replyId);
@@ -106,6 +141,16 @@ export function BrowserRooms() {
     return member!.operatorId === status?.memberId ? 'you' : status?.members?.find(m => m.id === member!.operatorId)?.name || 'a former member';
   };
   const nameOf = (memberId: string) => status?.members?.find(m => m.id === memberId)?.name || 'Former member';
+  /** Task changes read as quiet lines between messages, placed by time. They are local views, never sent. */
+  const timeline = useMemo(() => taskTimeline(taskOps), [taskOps]);
+  const items = useMemo((): TranscriptItem[] => {
+    const merged: TranscriptItem[] = []; let next = 0;
+    for (const message of messages) {
+      while (next < timeline.length && timeline[next].at <= message.packet.body.at) merged.push({ event: timeline[next++] });
+      merged.push({ message });
+    }
+    return [...merged, ...timeline.slice(next).map(event => ({ event }))];
+  }, [messages, timeline]);
 
   useEffect(() => {
     let disposed = false, timer: ReturnType<typeof setTimeout>, wake: (() => void) | undefined;
@@ -134,18 +179,15 @@ export function BrowserRooms() {
           if (disposed) return;
           if (added) {
             const own = added.packet.body.deviceId === device.id;
-            const scroller = transcript.current;
-            const atBottom = !!scroller && scroller.clientHeight > 0 && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 100;
-            const usingControls = !!document.activeElement?.closest('.browser-requests, .browser-details');
-            if (own || (atBottom && !usingControls)) requestAnimationFrame(() => scrollToLatest());
-            else setUnread(count => count + 1);
+            stick.arrived(own);
             if (!own) {
               const author = currentStatus.current?.members?.find(p => p.id === added.packet.body.memberId)?.name || 'Room member';
-              setLiveMessage({ id: added.packet.body.id, text: `${author}: ${added.packet.body.text}` });
+              setLiveMessage({ id: added.packet.body.id, text: `${author}: ${shownText(added.packet.body) || `shared ${fileNames(added.packet.body)}`}` });
             }
           }
           setMessages(m); setConnected(c);
-        }, message => { if (!disposed) setNetwork(message); }, board => { if (!disposed) setTasks(board); });
+        }, message => { if (!disposed) setNetwork(message); }, (board, ops) => { if (!disposed) { setTasks(board); setTaskOps(ops); } }, view => { if (!disposed) setFiles(view); },
+        records => { if (!disposed) { setActivity(records); setNow(Date.now()); } });
         peers.current = engine; await engine.load();
         while (!disposed) {
           try {
@@ -181,18 +223,55 @@ export function BrowserRooms() {
     })().catch(e => { if (!disposed) { setError(e.message); setReady(true); } });
     return () => { disposed = true; engine?.stop(); peers.current = null; clearTimeout(timer); wake?.(); };
   }, [api, retry]);
-  useEffect(() => { if (admitted) scrollToLatest(); }, [admitted]);
   useEffect(() => { if (detailsOpen) detailsHeading.current?.focus(); }, [detailsOpen]);
+  // Activity durations and staleness move with the clock, not only with packets.
+  useEffect(() => {
+    if (!agents.length) return;
+    const timer = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, [agents.length]);
   useEffect(() => {
     if (!admitted || !notice) return;
     const timeout = setTimeout(() => setNotice(''), 6000);
     return () => clearTimeout(timeout);
   }, [admitted, notice]);
 
-  function scrollToLatest() {
-    const scroller = transcript.current;
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
-    setUnread(0);
+  useEffect(() => {
+    if (!highlight) return;
+    const timeout = setTimeout(() => setHighlight(undefined), 2400);
+    return () => clearTimeout(timeout);
+  }, [highlight]);
+  function showTask(taskId: string) { setBoardOpen(true); setDetailsOpen(false); setHighlight(taskId); }
+  function showMessage(id: string) {
+    setDetailsOpen(false); setHighlight(id);
+    requestAnimationFrame(() => document.getElementById(`message-${id}`)?.scrollIntoView({ block: 'center' }));
+  }
+  /** An agent's activity as the freshest report from any of its devices this browser is connected to. */
+  const activityOf = (member: BrowserMember): AgentActivity => {
+    const devices = status?.devices?.filter(d => d.memberId === member.id && connected.includes(d.id)) || [];
+    return deriveActivity(devices.map(d => activity[d.id]), devices.length > 0, now);
+  };
+  const activities = new Map(agents.map(agent => [agent.id, activityOf(agent)]));
+  const working = [...activities.values()].filter(a => a.state === 'working').length;
+  /** Task id → names of agents working on it right now, for markers on the board. */
+  const workingOn: Record<string, string[]> = {};
+  for (const agent of agents) {
+    const a = activities.get(agent.id);
+    if (a?.state === 'working' && a.quiet === undefined) for (const id of a.on.tasks || []) (workingOn[id] ||= []).push(agent.name);
+  }
+  /** "Working on “Fix header” · 4 min", "Replying to Igor · 1 min", "Idle · 12 min", with links to the task or message. */
+  function activityLine(a: AgentActivity) {
+    if (a.state === 'offline' || a.state === 'online') return <span className={`agent-activity is-${a.state}`}>{a.state === 'offline' ? 'Offline' : 'Online'}</span>;
+    const age = <span className="agent-activity-age"> · {duration(now - a.since)}</span>;
+    if (a.state === 'idle') return <span className="agent-activity is-idle">Idle{a.quiet === undefined ? age : <span className="agent-activity-quiet"> · no check-in for {duration(a.quiet)}</span>}</span>;
+    if (a.quiet !== undefined) return <span className="agent-activity is-working is-quiet">Busy<span className="agent-activity-quiet"> · no check-in for {duration(a.quiet)}</span></span>;
+    const task = a.on.tasks?.map(id => tasks.find(t => t.id === id)).find(Boolean);
+    if (task) return <span className="agent-activity is-working">Working on <button className="agent-activity-link" title="Show on the task board" onClick={() => showTask(task.id)}>“{task.title}”</button>{age}</span>;
+    const woke = (a.on.messages || []).map(id => messages.find(m => m.packet.body.id === id)?.packet.body).filter(b => !!b);
+    if (!woke.length) return <span className="agent-activity is-working">Working{age}</span>;
+    const authors = [...new Set(woke.map(b => b.memberId === status?.memberId ? 'you' : nameOf(b.memberId)))];
+    const latest = woke.at(-1)!;
+    return <span className="agent-activity is-working">Replying to <button className="agent-activity-link" title="Show the message" onClick={() => showMessage(latest.id)}>{authors.length > 1 ? `${authors.slice(0, -1).join(', ')} and ${authors.at(-1)}` : authors[0]}</button>{age}</span>;
   }
   function closeDetails() { setDetailsOpen(false); detailsButton.current?.focus(); }
 
@@ -230,10 +309,58 @@ export function BrowserRooms() {
     try { await navigator.clipboard.writeText(invite); setNotice('Room link copied.'); }
     catch { setDetailsOpen(true); setNotice('Copy the room link from Room details.'); }
   }
+  const readyFiles = chosen.filter(f => f.status === 'ready');
+  // More than MAX_MESSAGE_FILES only after a failed send brought its files back: the person removes some before sending.
+  const canSend = !busy && chosen.length <= MAX_MESSAGE_FILES && chosen.every(f => f.status === 'ready') && (!!text.trim() || readyFiles.length > 0);
   function send(event: FormEvent) {
-    event.preventDefault(); const draft = text, replyTo = reply ? replyId : undefined;
-    void act(async () => { if (!peers.current) throw new Error('Room connection is not ready.'); await peers.current.send(draft, replyTo); setText(''); setReplyId(undefined); });
+    event.preventDefault(); if (!canSend) return;
+    const draft = text, replyTo = reply ? replyId : undefined, sending = readyFiles;
+    // Clear at once, so whatever is typed while this sends is a new draft; a failed send puts its text back in front.
+    setText(''); setReplyId(undefined); setChosen(current => current.filter(f => !sending.includes(f)));
+    void act(async () => {
+      try {
+        if (!peers.current) throw new Error('Room connection is not ready.');
+        await peers.current.send(draft, replyTo, sending.map(f => ({ ref: f.ref!, bytes: f.bytes! })));
+      } catch (e) {
+        setText(current => !draft ? current : current.trim() ? `${draft}\n${current}` : draft);
+        setReplyId(current => current ?? replyTo);
+        setChosen(current => [...sending, ...current]); // Files added while it was sending are kept too.
+        throw e;
+      }
+      sending.forEach(f => f.preview && URL.revokeObjectURL(f.preview));
+    });
   }
+  /** Files are read and hashed as soon as they are chosen; nothing leaves this browser until the message is sent. */
+  function addFiles(list: FileList | File[] | null | undefined) {
+    const picked = [...(list || [])]; if (!picked.length) return;
+    const accepted = picked.filter(f => f.size > 0 && f.size <= MAX_UPLOAD_BYTES).slice(0, Math.max(0, MAX_MESSAGE_FILES - chosen.length));
+    if (accepted.length < picked.length) setError(`Attach up to ${MAX_MESSAGE_FILES} files of ${formatBytes(MAX_UPLOAD_BYTES)} or less per message.`);
+    const items: ChosenFile[] = accepted.map(file => ({ key: crypto.randomUUID(), file, name: uploadName(file), status: 'uploading',
+      preview: /^image\/(png|jpeg|gif|webp)$/.test(file.type) ? URL.createObjectURL(file) : undefined }));
+    setChosen(current => [...current, ...items]);
+    items.forEach(prepareFile);
+  }
+  function prepareFile(item: ChosenFile) {
+    const patch = (change: Partial<ChosenFile>) => setChosen(current => current.map(f => f.key === item.key ? { ...f, ...change } : f));
+    patch({ status: 'uploading', error: undefined });
+    item.file.arrayBuffer().then(async buffer => { const bytes = new Uint8Array(buffer); patch({ status: 'ready', bytes, ref: await attachmentRef(bytes, item.name) }); })
+      .catch(e => patch({ status: 'failed', error: e instanceof Error ? e.message : 'Could not read this file.' }));
+  }
+  function removeFile(key: string) {
+    setChosen(current => { const item = current.find(f => f.key === key); if (item?.preview) URL.revokeObjectURL(item.preview); return current.filter(f => f.key !== key); });
+  }
+  /** Where a message's file is in this browser: a blob URL once verified and stored, or what is happening to it. */
+  const fileSource: AttachmentSource = attachment => {
+    const sha = (attachment as Attachment & { sha256: string }).sha256, view = files[sha];
+    if (view?.url) return { url: view.url };
+    const transfer = view?.transfer;
+    if (transfer?.state === 'fetching') return { note: `Receiving · ${Math.floor(transfer.received * 100 / transfer.size)}%` };
+    if (transfer?.state === 'damaged') return { note: 'A copy failed verification. Trying other devices.' };
+    if (peers.current?.evicted(sha)) return { note: 'Not kept in this browser: newer files filled this room’s storage' };
+    return { note: connected.length ? 'Waiting for a device that has this file' : 'Available when a device that has it connects' };
+  };
+  const attachmentsOf = (body: SavedMessage['packet']['body']): Attachment[] => (body.attachments || []).map(ref => ({ ...ref,
+    kind: files[ref.sha256]?.url ? displayKind(ref, files[ref.sha256].type) : IMAGE_TYPES.includes(ref.type) ? 'image' : 'file' }));
   function startReply(id: string) { setReplyId(id); requestAnimationFrame(() => composer.current?.focus()); }
   function connectAgent(event: FormEvent) {
     event.preventDefault(); const name = agentName.trim();
@@ -303,14 +430,16 @@ export function BrowserRooms() {
     </div>;
   }
 
-  return <div className={`browser-rooms ${admitted ? 'browser-joined' : ''}`}>
+  return <div className={`browser-rooms ${admitted ? 'browser-joined' : ''} ${admitted && railCollapsed ? 'browser-rail-collapsed' : ''}`}>
     <a className="skip-link" href="#browser-main">Skip to room</a>
     <aside className="browser-rail">
-      <a className="browser-brand" href="/rooms" aria-label="Meshrooms rooms"><Wordmark demo={false} /></a>
+      <div className="browser-rail-top"><a className="browser-brand" href="/rooms" aria-label="Meshrooms rooms"><Wordmark demo={false} /></a>
+        {admitted && <button className="browser-rail-toggle" aria-controls="browser-room-nav" aria-expanded={!railCollapsed} title={railCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          onClick={() => setRailCollapsed(!railCollapsed)}><RoomIcon kind={railCollapsed ? 'expand' : 'collapse'} /><span className="sr-only">{railCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}</span></button>}</div>
       {admitted ? <>
-        <nav className="browser-room-nav" aria-label="Your rooms"><h2>Your rooms</h2>
-          {[{ id: urlRoom, title }, ...recent.filter(r => r.id !== urlRoom)].map(r => <a key={r.id} href={`/r/${r.id}`} aria-current={r.id === urlRoom ? 'page' : undefined}><RoomIcon kind="chat" /><span>{r.title}</span></a>)}
-          <a href="/rooms" className="browser-all-rooms">Create a room</a>
+        <nav id="browser-room-nav" className="browser-room-nav" aria-label="Your rooms"><h2>Your rooms</h2>
+          {[{ id: urlRoom, title }, ...recent.filter(r => r.id !== urlRoom)].map(r => <a key={r.id} href={`/r/${r.id}`} title={railCollapsed ? r.title : undefined} aria-current={r.id === urlRoom ? 'page' : undefined}><RoomIcon kind="chat" /><span>{r.title}</span></a>)}
+          <a href="/rooms" className="browser-all-rooms" title={railCollapsed ? 'Create a room' : undefined}><RoomIcon kind="plus" /><span>Create a room</span></a>
         </nav>
         <a href="/rooms" className="browser-mobile-rooms">Your rooms</a>
         <div className="browser-self"><MemberAvatar member={self} roomId={urlRoom} fallback={self?.name || ''} /><div><strong>{self?.name}</strong><span>{host ? 'Room host' : 'Room member'}</span></div></div>
@@ -343,7 +472,7 @@ export function BrowserRooms() {
           </>}
         </section> : <>
           <header className="browser-room-header">
-            <div className="browser-room-heading"><h1>{title}</h1><p>{people} {people === 1 ? 'person' : 'people'}{agents.length ? ` and ${agents.length} agent${agents.length === 1 ? '' : 's'}` : ''} in this room</p></div>
+            <div className="browser-room-heading"><h1>{title}</h1><p>{people} {people === 1 ? 'person' : 'people'}{agents.length ? ` and ${agents.length} agent${agents.length === 1 ? '' : 's'}` : ''} in this room{working ? ` · ${working} working` : ''}</p></div>
             <div className="browser-room-actions"><button className="secondary" aria-expanded={boardOpen} aria-controls="task-board" onClick={() => { setBoardOpen(!boardOpen); setDetailsOpen(false); }}><RoomIcon kind="tasks" />Tasks{openTasks ? <span className="browser-count">{openTasks}</span> : null}</button><button className="secondary" ref={detailsButton} aria-expanded={detailsOpen} aria-controls="browser-room-details" onClick={() => { if (detailsOpen) closeDetails(); else { setDetailsOpen(true); setBoardOpen(false); } }}><RoomIcon kind="people" />Room details</button><button className="primary" onClick={() => void copyInvite()}><RoomIcon kind="link" />Copy room link</button></div>
           </header>
           <p className="sr-only" role="status">{host && status.requests?.length ? `${status.requests.length} request${status.requests.length === 1 ? '' : 's'} waiting to join. Use the join requests section to admit or decline.` : ''}</p>
@@ -354,29 +483,44 @@ export function BrowserRooms() {
           </section>}
           <p className="sr-only" aria-live="polite" aria-atomic="true">{liveMessage && <span key={liveMessage.id}>{liveMessage.text}</span>}</p>
           <div className="browser-workspace">
-            <div className="browser-conversation">
-              <section ref={transcript} className="browser-transcript" role="log" aria-live="off" aria-label="Conversation" tabIndex={0} onScroll={e => { const el = e.currentTarget; if (el.scrollHeight - el.clientHeight - el.scrollTop < 100) setUnread(0); }}>
+            <div className={`browser-conversation ${dragging ? 'dragging' : ''}`}
+              onDragEnter={e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragging(true); } }}
+              onDragOver={e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } }}
+              onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
+              onDrop={e => { if (!e.dataTransfer.files.length) return; e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}>
+              {dragging && <div className="drop-overlay" aria-hidden="true"><RoomIcon kind="clip" /><strong>Drop to attach</strong><span>Screenshots and files up to {formatBytes(MAX_UPLOAD_BYTES)}</span></div>}
+              <section ref={stick.ref} className="browser-transcript" role="log" aria-live="off" aria-label="Conversation" tabIndex={0} onScroll={stick.onScroll}>
                 <div className="browser-message-list">
                   {!messages.length && <div className="browser-empty"><RoomIcon kind="chat" /><h2>{status.members!.length > 1 ? 'Ready for your first message' : status.requests?.length ? 'Your conversation starts here' : 'Bring someone into the room'}</h2><p>{status.members!.length > 1 ? 'Send a message below to start the conversation.' : status.requests?.length ? 'Someone is waiting to join. Admit them above to get started.' : 'Share the room link with someone, or open it on another device.'}</p></div>}
-                  {messages.map((m, index) => {
-                    const body = m.packet.body;
+                  {items.map((item, index) => {
+                    const previous = items[index - 1], at = item.message?.packet.body.at ?? item.event!.at;
+                    const day = (!index || !sameDay(previous.message?.packet.body.at ?? previous.event!.at, at)) && <div className="browser-day"><span>{dayLabel(at)}</span></div>;
+                    if (item.event) {
+                      const event = item.event, line = describeTask(event, (id, subject) => id === status.memberId ? subject ? 'You' : 'you' : nameOf(id));
+                      const time = <time dateTime={new Date(at).toISOString()}>{new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>;
+                      return <Fragment key={event.id}>{day}<p className="browser-task-line">
+                        {tasks.some(t => t.id === event.taskId) ? <button title="Show on the task board" onClick={() => showTask(event.taskId)}>{line}</button> : <span>{line}</span>}{time}</p></Fragment>;
+                    }
+                    const m = item.message, body = m.packet.body;
                     const member = status.members!.find(p => p.id === body.memberId);
                     const author = member?.name || 'Former member';
                     const target = body.replyTo ? messages.find(t => t.packet.body.id === body.replyTo)?.packet.body : undefined;
-                    const continuation = grouped(messages[index - 1], m) && !body.replyTo;
-                    const next = messages[index + 1];
+                    const continuation = grouped(previous?.message, m) && !body.replyTo;
+                    const next = items[index + 1]?.message;
                     const own = body.deviceId === status.deviceId;
                     const showReceipt = own && (!next || !grouped(m, next) || m.receipts.length < m.targets.length);
                     const forYou = body.memberId !== status.memberId && (mentionedIds(body.text, participants).includes(status.memberId!) || target?.memberId === status.memberId);
                     const operator = operatorOf(member);
+                    const shown = shownText(body), quoted = target && (shownText(target) || fileNames(target));
                     return <Fragment key={body.id}>
-                      {(!index || !sameDay(messages[index - 1].packet.body.at, body.at)) && <div className="browser-day"><span>{dayLabel(body.at)}</span></div>}
-                      <article className={`browser-message ${continuation ? 'browser-message-continuation' : ''} ${forYou ? 'browser-message-for-you' : ''} ${isAgent(member) ? 'browser-message-agent' : ''}`}>
+                      {day}
+                      <article id={`message-${body.id}`} className={`browser-message ${highlight === body.id ? 'browser-message-highlight' : ''} ${continuation ? 'browser-message-continuation' : ''} ${forYou ? 'browser-message-for-you' : ''} ${isAgent(member) ? 'browser-message-agent' : ''}`}>
                         <MemberAvatar member={member} roomId={urlRoom} fallback={author} />
                         <div><header className={continuation ? 'sr-only' : ''}><strong>{author}</strong>{isAgent(member) && <span className="browser-role">agent</span>}{operator && <span className="browser-operator">for {operator}</span>}{body.memberId === status.memberId && <span className="browser-author-you">you</span>}<time dateTime={new Date(body.at).toISOString()}>{new Date(body.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
                           <button className="browser-reply-button" aria-label={`Reply to ${own ? 'your' : `${author}’s`} message`} title="Reply" onClick={() => startReply(body.id)}>Reply</button></header>
-                          {body.replyTo && <p className="browser-reply-reference">{target ? <>Replying to <strong>{nameOf(target.memberId)}</strong>: {target.text.length > 120 ? `${target.text.slice(0, 120)}…` : target.text}</> : 'Replying to an earlier message'}</p>}
-                          <div className="message-text"><MentionText text={body.text} participants={participants} viewerId={status.memberId} /></div>
+                          {body.replyTo && <p className="browser-reply-reference">{target ? <>Replying to <strong>{nameOf(target.memberId)}</strong>: {quoted!.length > 120 ? `${quoted!.slice(0, 120)}…` : quoted}</> : 'Replying to an earlier message'}</p>}
+                          {shown && <div className="message-text"><MentionText text={shown} participants={participants} viewerId={status.memberId} /></div>}
+                          {body.attachments && <MessageAttachments roomId={urlRoom} attachments={attachmentsOf(body)} author={own ? 'You' : author} source={fileSource} />}
                           {showReceipt && <span className="browser-receipt">{m.targets.length ? `Stored on ${m.receipts.length} of ${m.targets.length} devices` : 'Saved in this browser'}</span>}
                         </div>
                       </article>
@@ -385,17 +529,22 @@ export function BrowserRooms() {
                 </div>
               </section>
               <div className="browser-compose-area">
-                {unread > 0 && <button className="secondary browser-unread" onClick={scrollToLatest}>Show {unread} new message{unread === 1 ? '' : 's'}</button>}
+                {stick.unread > 0 && <button className="secondary browser-unread" onClick={stick.toBottom}>{stick.unread === 1 ? 'New message' : `${stick.unread} new messages`} <span aria-hidden="true">↓</span></button>}
                 {mentions.list}
                 {reply && <div className="browser-reply-draft"><span>Replying to <strong>{reply.packet.body.memberId === status.memberId ? 'your message' : nameOf(reply.packet.body.memberId)}</strong></span><button className="browser-close" aria-label="Cancel reply" onClick={() => setReplyId(undefined)}><RoomIcon kind="close" /></button></div>}
                 <form className="browser-composer" onSubmit={send}><label className="sr-only" htmlFor="browser-message">Message {title}</label><textarea ref={composer} id="browser-message" value={text} {...mentions.inputProps}
                   onChange={e => { setText(e.target.value); mentions.track(e.target.value, e.target.selectionStart); }} onSelect={e => mentions.track(e.currentTarget.value, e.currentTarget.selectionStart)} onBlur={mentions.close}
-                  onKeyDown={e => { if (mentions.onKeyDown(e)) return; if (e.key === 'Escape' && reply) { setReplyId(undefined); return; } if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (text.trim() && !busy) send(e); } }}
-                  maxLength={4000} rows={2} placeholder={agents.length ? `Message ${title} · type @ to ask an agent` : `Message ${title}`} /><div><span className="browser-key-hint">Enter to send · Shift + Enter for a new line</span><button className="primary" disabled={busy || !text.trim()}><span>Send</span><RoomIcon kind="send" /></button></div></form>
+                  onPaste={e => { const pasted = [...e.clipboardData.files]; if (pasted.length) { e.preventDefault(); addFiles(pasted); } }}
+                  onKeyDown={e => { if (mentions.onKeyDown(e)) return; if (e.key === 'Escape' && reply) { setReplyId(undefined); return; } if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); send(e); } }}
+                  maxLength={4000} rows={2} placeholder={agents.length ? `Message ${title} · type @ to ask an agent` : `Message ${title}`} />
+                  <PendingFiles files={chosen} onRemove={removeFile} onRetry={key => { const item = chosen.find(f => f.key === key); if (item) prepareFile(item); }} />
+                  <div><span className="browser-compose-tools"><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(e.target.files); e.target.value = ''; }} />
+                    <button type="button" className="secondary browser-attach" title="Attach screenshots or files (you can also paste or drop them)" onClick={() => fileInput.current?.click()}><RoomIcon kind="clip" /><span>Attach</span></button>
+                    <span className="browser-key-hint">Enter to send · Shift + Enter for a new line</span></span><button className="primary" disabled={!canSend}><span>Send</span><RoomIcon kind="send" /></button></div></form>
                 <p className="browser-connection" role="status"><span className={`browser-connection-dot ${connected.length ? 'is-connected' : ''}`} aria-hidden="true" />{connected.length ? `Connected to ${connected.length} other device${connected.length === 1 ? '' : 's'}` : status.devices!.length > 1 ? 'Waiting for another device to connect' : 'You’re the first one here'}</p>
               </div>
             </div>
-            {boardOpen && <TaskBoard room={boardRoom} viewerId={status.memberId} disabled={!admitted} onClose={() => setBoardOpen(false)} actions={boardActions} />}
+            {boardOpen && <TaskBoard room={boardRoom} viewerId={status.memberId} disabled={!admitted} onClose={() => setBoardOpen(false)} actions={boardActions} highlight={highlight} working={workingOn} />}
             <aside id="browser-room-details" className="browser-details" aria-label="Room details" hidden={!detailsOpen} onKeyDown={e => { if (e.key === 'Escape') closeDetails(); }}>
               <header className="browser-details-heading"><h2 tabIndex={-1} ref={detailsHeading}>Room details</h2><button className="browser-close" aria-label="Close room details" onClick={closeDetails}><RoomIcon kind="close" /></button></header>
               <section aria-label="People and agents in this room" className="browser-people"><h3>{agents.length ? 'People and agents' : 'People'} <span>{status.members!.length}</span></h3>
@@ -404,8 +553,11 @@ export function BrowserRooms() {
                   // The host may remove anyone but themselves; an operator may remove their own agents.
                   const removable = member.id !== status.memberId && (host ? member.id !== status.ownerId : isAgent(member) && member.operatorId === status.memberId);
                   const operatesIt = isAgent(member) && member.operatorId === status.memberId;
-                  return <div className="browser-person" key={member.id}><MemberAvatar member={member} roomId={urlRoom} fallback={member.name} /><div><strong>{member.name}{member.id === status.memberId ? ' (you)' : ''}</strong>
+                  const a = activities.get(member.id);
+                  return <div className="browser-person" key={member.id}><span className="browser-person-avatar"><MemberAvatar member={member} roomId={urlRoom} fallback={member.name} />{a && <span className={`agent-dot is-${a.state}${a.state !== 'offline' && a.state !== 'online' && a.quiet !== undefined ? ' is-quiet' : ''}`} aria-hidden="true" />}</span><div><strong>{member.name}{member.id === status.memberId ? ' (you)' : ''}</strong>
                     <span>{isAgent(member) ? `Agent · operated by ${operatorOf(member)}` : `${member.id === status.ownerId ? 'Host · ' : ''}${devices} device${devices === 1 ? '' : 's'}`}</span>
+                    {a && activityLine(a)}
+                    {a && a.state !== 'offline' && a.state !== 'online' && a.note && <span className="agent-activity-note">{a.note}</span>}
                     {removable && (confirming === member.id ? confirmRemove(member) : <button className="browser-remove" disabled={busy} aria-label={`Remove ${member.name} from the room`} onClick={() => setConfirming(member.id)}>{isAgent(member) ? 'Remove agent' : 'Remove'}</button>)}
                     {operatesIt && <button className="browser-text-link browser-picture-link" disabled={busy} onClick={() => pickAvatar(member.id)}>{member.avatar ? 'Change picture' : 'Set picture'}</button>}
                     {member.avatar && member.id !== status.memberId && (operatesIt || host) && <button className="browser-remove" disabled={busy} onClick={() => clearAvatar(member.id)}>Remove picture</button>}</div></div>;
@@ -445,7 +597,7 @@ export function BrowserRooms() {
                 </details>
                 {!host && self && (confirming === self.id ? confirmRemove(self) : <button className="browser-remove browser-leave" disabled={busy} onClick={() => setConfirming(self.id)}>Leave this room</button>)}
               </section>
-              <p className="browser-storage-note">Messages stay in participating browsers. Device receipts confirm storage, not that someone has read a message.</p>
+              <p className="browser-storage-note">Messages and files stay in participating browsers; each keeps the newest 256 MB of files per room. Device receipts confirm storage, not that someone has read a message.</p>
             </aside>
           </div>
         </>}

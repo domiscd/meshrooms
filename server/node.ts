@@ -4,7 +4,7 @@ import type { Attachment, Draft, NodeSnapshot, Participant, RoomSnapshot } from 
 import { memoryBlobs, type BlobStore } from './blobs';
 import { MAX_ATTACHMENT_BYTES, MAX_MESSAGE_ATTACHMENTS, MAX_PENDING_ATTACHMENTS, MAX_ROOM_ATTACHMENTS, MAX_ROOM_ATTACHMENT_BYTES, PENDING_ATTACHMENT_MS,
   cleanName, defaultName, normalizeAttachment, sniff } from './attachments';
-import { DEFAULT_FLOOR, FLOORS, TASK_STATUSES, mayAgentSpeak, mentionedIds, type Floor, type Task } from '../src/collab';
+import { DEFAULT_FLOOR, FLOORS, TASK_STATUSES, mayAgentSpeak, mentionedIds, reservedName, type Floor, type Task } from '../src/collab';
 import type { SetupCommand, PendingRoom } from '../src/setup';
 import type { DurableStore } from './persistence/store';
 import { CATALOG, CATALOG_V1, MAX_BOARD_RECEIPTS, MAX_ROOMS, MAX_MESSAGES, MAX_HISTORY_BYTES, MAX_TASKS, attachmentsKey, boardKey, fingerprint, historyKey, isHash, isUuid,
@@ -16,6 +16,12 @@ export class NodeError extends Error { constructor(public status: number, messag
 export function requestId(value: unknown): string {
   if (!isUuid(value)) throw new NodeError(400, 'A UUID requestId is required. Reuse it when retrying the same command.');
   return value.toLowerCase();
+}
+/** A participant name; `agents` is reserved because `@agents` addresses every agent. */
+function personName(value: unknown, name: string): string {
+  const result = text(value, name, 64);
+  if (reservedName(result)) throw new NodeError(400, '"agents" is reserved: @agents addresses every agent. Choose another name.');
+  return result;
 }
 function text(value: unknown, name: string, max: number, required = true): string {
   if (typeof value !== 'string' || value.length > max || (required && !value.trim())) throw new NodeError(400, `Enter ${name} up to ${max} characters.`);
@@ -139,7 +145,7 @@ export class LocalNode {
   prepareRoom(input: { requestId?: unknown; title?: unknown; project?: unknown; agentName?: unknown; credentialHash?: unknown }): PendingRoom {
     this.assertReady();
     const id = requestId(input.requestId); const title = text(input.title, 'a room name', 64);
-    const project = text(input.project ?? '', 'a project label', 48, false); const agentName = text(input.agentName, 'an agent name', 64);
+    const project = text(input.project ?? '', 'a project label', 48, false); const agentName = personName(input.agentName, 'an agent name');
     if (!isHash(input.credentialHash)) throw new NodeError(400, 'A credential hash is required.');
     const hash = fingerprint({ title, project, agentName, credentialHash: input.credentialHash });
     const existing = this.catalog.intents.find(intent => intent.id === id);
@@ -151,7 +157,7 @@ export class LocalNode {
     return this.pending(id)!;
   }
   validateSetup(input: Record<string, unknown>): SetupCommand {
-    const command: SetupCommand = { requestId: requestId(input.requestId), humanName: text(input.humanName, 'your name', 64),
+    const command: SetupCommand = { requestId: requestId(input.requestId), humanName: personName(input.humanName, 'your name'),
       machineName: text(input.machineName, 'a machine name', 64), startAtLogin: false };
     if (typeof input.startAtLogin !== 'boolean') throw new NodeError(400, 'Choose a startup preference.');
     command.startAtLogin = input.startAtLogin;
