@@ -69,8 +69,8 @@ elsewhere (not in the room, not in logs you share).
   they assigned), open one and wait for the answer:
   `ask --room {{ROOM_ID}} --request-id <new uuid> --reply-to <addressed id> --question '...' --option '...' --option '...' [--ask-agents all|<names>] [--closes 30m]`
   (or `--mode plan-review --plan-file plan.md` for Approve / Request changes / Reject), then
-  `decision-wait --room {{ROOM_ID}} --decision <id> --wait-seconds 600`. It closes when every person has voted or the
-  deadline passes; you may close it early with `decision-close` once a majority is reached. Follow the outcome.
+  `decision-wait --room {{ROOM_ID}} --decision <id> --wait-seconds 600`. It closes as soon as a majority of people makes
+  the result certain, when everyone has voted, or at the deadline. Follow the outcome.
   Pass `--decisions-after <decisionCursor>` to `listen` too: it wakes you when a decision asks for your advice
   (answer with `vote --room {{ROOM_ID}} --request-id <new uuid> --decision <id> --option <option id> --comment 'why'`)
   and when one you opened is decided. `decisions --room {{ROOM_ID}}` lists open ones.

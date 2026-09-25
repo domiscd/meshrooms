@@ -5,7 +5,8 @@
  *
  * A decision is a chain of revisions keyed by its creator and id, so nobody can take over someone else's decision by
  * signing a competing first revision; each operation must extend the one before it, and ties at a revision fall to the
- * lower operation id, so clocks never decide anything. Closing pins the people's votes it counted: every device checks
+ * lower operation id, so clocks never decide anything. A decision closes as soon as a majority of people makes the result
+ * certain, when everyone has voted, or at its deadline. Closing pins the people's votes it counted: every device checks
  * them against the votes it holds and rejects a close whose tally doesn't add up, so a steward can end a decision but
  * cannot invent its outcome.
  */
@@ -44,7 +45,7 @@ export type Decision = {
   key: string; id: string; question: string; context: string; mode: DecisionMode; options: DecisionOption[]; askAgents: boolean | string[];
   closesAt: number | null; state: DecisionState; outcome?: Outcome; createdBy: string; createdAt: number; updatedAt: number; revision: number;
   votes: Vote[];
-  /** For open decisions: people's votes so far, and whether the result can no longer change (a majority is reached). */
+  /** For open decisions: people's votes so far, and whether the result can no longer change (a majority is reached, so it closes). */
   tally: Outcome; settled: boolean;
   /** Closed: false while some counted votes haven't reached this device. `uncounted` people's votes arrived after the close. */
   verified: boolean; uncounted: number;
@@ -170,13 +171,8 @@ export function foldDecisions(ops: (DecisionBody | VoteBody)[], room: RoomMember
   return decisions.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
 }
 
-/**
- * Whether a steward's device should close a decision on its own: every person has voted, or the deadline passed. A
- * majority reached earlier (`settled`) is shown, and a steward may close then, but people keep the chance to vote.
- */
-export function due(decision: Decision, now: number) {
-  return decision.state === 'open' && ((decision.tally.people > 0 && decision.tally.voters >= decision.tally.people) || (decision.closesAt !== null && now >= decision.closesAt));
-}
+/** Whether a steward's device should close a decision now: a majority is reached (the result can no longer change) or the deadline passed. */
+export function due(decision: Decision, now: number) { return decision.state === 'open' && (decision.settled || (decision.closesAt !== null && now >= decision.closesAt)); }
 
 type Author = { roomId: string; deviceId: string; memberId: string };
 const stampOf = (a: Author) => ({ roomId: a.roomId, id: crypto.randomUUID(), deviceId: a.deviceId, memberId: a.memberId, at: Date.now() });

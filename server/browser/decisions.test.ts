@@ -123,7 +123,7 @@ test('a close must add up: forged tallies and agents counted as people are rejec
   expect(fold([...ops, honest, late])[0]).toMatchObject({ uncounted: 1, outcome: { optionIds: ['o2'] } });
 });
 
-test('votes need a decision this device holds; each member has a share of the cap; auto-close waits for everyone', () => {
+test('votes need a decision this device holds; each member has a share of the cap; a majority closes it', () => {
   const open = openDecision({ ...as(igor), question: 'Q', options: ['A', 'B'] });
   const d = fold([open])[0];
   const stray = { ...castVote(as(dom), d, 'o1'), decisionId: crypto.randomUUID() };
@@ -132,7 +132,8 @@ test('votes need a decision this device holds; each member has a share of the ca
   const flood = Array.from({ length: 450 }, (_, i) => castVote(as(dom), d, 'o1', '', i + 1));
   expect(admissible([open], flood).length).toBe(400);
   const two = fold([open, castVote(as(igor), d, 'o1'), castVote(as(dom), d, 'o1')])[0];
-  expect(two).toMatchObject({ settled: true }); // majority reached: shown, and a steward may close
-  expect(due(two, Date.now())).toBe(false); // but it doesn't close on its own until Sam votes or the deadline passes
-  expect(due(fold([open, castVote(as(igor), d, 'o1'), castVote(as(dom), d, 'o1'), castVote(as(sam), d, 'o2')])[0], Date.now())).toBe(true);
+  expect(two).toMatchObject({ settled: true });
+  expect(due(two, Date.now())).toBe(true); // a majority of people makes it certain, so it closes without waiting for Sam
+  const one = fold([open, castVote(as(igor), d, 'o1')])[0];
+  expect(due(one, Date.now())).toBe(false); // one of three people can still be outvoted
 });
