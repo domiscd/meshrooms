@@ -66,7 +66,8 @@ export function mentionSegments(text: string, participants: Pick<Participant, 'i
   return segments;
 }
 
-type RoomView = { floor?: Floor; messages: Message[]; participants: Pick<Participant, 'id' | 'role' | 'operatorId' | 'wake'>[]; tasks?: Task[] };
+/** `agentAssignmentsWake`: a host setting in browser rooms that lets an agent's assignment wake another agent. */
+type RoomView = { floor?: Floor; messages: Message[]; participants: Pick<Participant, 'id' | 'role' | 'operatorId' | 'wake'>[]; tasks?: Task[]; agentAssignmentsWake?: boolean };
 
 /** A message addresses a participant by mentioning them or by replying to one of their messages. */
 export function addresses(message: Message, participantId: string, messages: Message[]): boolean {
@@ -90,10 +91,14 @@ export function wakes(room: RoomView, message: Message, agentId: string): boolea
   return addresses(message, agentId, room.messages);
 }
 
-/** Whether an assignment should wake its agent: from a person in humans-first rooms, from anyone else in open rooms. */
+/**
+ * Whether an assignment should wake its agent: from a person in humans-first rooms (or from another agent when the room
+ * allows agents to hand work to each other), from anyone else in open rooms.
+ */
 export function assignmentWakes(room: RoomView, task: Task, agentId: string): boolean {
   if (task.assigneeId !== agentId || task.status === 'done' || !task.assignedBy || task.assignedBy === agentId || !mayWake(room, agentId, task.assignedBy)) return false;
-  return (room.floor ?? DEFAULT_FLOOR) === 'open' || roleOf(room, task.assignedBy) === 'human';
+  const assigner = roleOf(room, task.assignedBy);
+  return (room.floor ?? DEFAULT_FLOOR) === 'open' || assigner === 'human' || (!!room.agentAssignmentsWake && assigner === 'agent');
 }
 
 /** An agent may speak when replying to a message that woke it, or while holding open work a person assigned. */

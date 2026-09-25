@@ -1,12 +1,12 @@
 import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react';
 import { mentionedIds, type Task } from '../collab';
-import { MentionText, TaskBoard, useMentions } from '../prototype/Collaboration';
+import { FloorControl, MentionText, TaskBoard, useMentions } from '../prototype/Collaboration';
 import { Wordmark } from '../prototype/RoomPrototype';
 import type { Participant, RoomSnapshot, TaskDraft } from '../room';
 import { BrowserApi } from './client';
 import { BrowserPeers, type SavedMessage } from './peers';
 import { identity, read, write } from './storage';
-import type { BrowserMember, JoinRequest, RoomStatus } from './protocol';
+import { DEFAULT_ROOM_SETTINGS, type BrowserMember, type JoinRequest, type RoomSettings, type RoomStatus } from './protocol';
 import './browser.css';
 
 type RecentRoom = { id: string; title: string };
@@ -248,6 +248,15 @@ export function BrowserRooms() {
     remove: (task: Task) => boardAction(engine => engine.changeTask({}, task, true)),
   };
   const openTasks = tasks.filter(t => t.status !== 'done').length;
+  const settings = status?.settings ?? DEFAULT_ROOM_SETTINGS;
+  function changeSettings(change: Partial<RoomSettings>, done: string) {
+    void act(async () => {
+      await api.command('settings', urlRoom, change);
+      // Show the accepted change now rather than at the next status poll, so the control doesn't flick back.
+      setStatus(current => current && { ...current, settings: { ...(current.settings ?? DEFAULT_ROOM_SETTINGS), ...change } });
+      setNotice(done);
+    });
+  }
   const agentsOf = (member: BrowserMember) => status?.members?.filter(m => isAgent(m) && m.operatorId === member.id).length || 0;
   /** Inline confirmation for removing a person or leaving, naming the agents that go with them. */
   function confirmRemove(member: BrowserMember) {
@@ -304,9 +313,9 @@ export function BrowserRooms() {
           </header>
           <p className="sr-only" role="status">{host && status.requests?.length ? `${status.requests.length} request${status.requests.length === 1 ? '' : 's'} waiting to join. Use the join requests section to admit or decline.` : ''}</p>
           {host && !!status.requests?.length && <section className="browser-requests" aria-label="Join requests"><h2>Waiting to join <span>{status.requests.length}</span></h2>
-            {status.requests.map(r => <div className="browser-request" key={r.id}><div><strong>{r.linkedMemberId ? status.members!.find(m => m.id === r.linkedMemberId)?.name : r.name}</strong><span>{r.kind === 'person' ? 'New person' : r.linkedMemberId ? 'Confirmed companion device' : 'Waiting for identity confirmation'} · {r.device.label}</span></div>
+            {status.requests.map(r => <div className="browser-request" key={r.id}><div><strong>{r.linkedMemberId ? status.members!.find(m => m.id === r.linkedMemberId)?.name : r.name}</strong><span>{r.kind === 'person' ? 'New person' : r.kind === 'agent' ? `Agent · operated by ${status.members!.find(m => m.id === r.operatorId)?.name || 'a former member'}` : r.linkedMemberId ? 'Confirmed companion device' : 'Waiting for identity confirmation'} · {r.device.label}</span></div>
               <div className="browser-request-actions"><button disabled={busy} onClick={() => void act(async () => { await api.command('decide', urlRoom, { requestId: r.id, admit: false }); })}>Decline</button>
-                {(r.kind === 'person' || r.linkedMemberId) && <button className="primary" disabled={busy} onClick={() => void act(async () => { await api.command('decide', urlRoom, { requestId: r.id, admit: true }); })}>Admit</button>}</div></div>)}
+                {(r.kind !== 'companion' || r.linkedMemberId) && <button className="primary" disabled={busy} onClick={() => void act(async () => { await api.command('decide', urlRoom, { requestId: r.id, admit: true }); })}>Admit</button>}</div></div>)}
           </section>}
           <p className="sr-only" aria-live="polite" aria-atomic="true">{liveMessage && <span key={liveMessage.id}>{liveMessage.text}</span>}</p>
           <div className="browser-workspace">
@@ -370,6 +379,17 @@ export function BrowserRooms() {
                   : <form onSubmit={connectAgent}><label>Agent name<input value={agentName} onChange={e => setAgentName(e.target.value)} required maxLength={64} placeholder="Codex" autoComplete="off" /></label><button className="secondary" disabled={busy || !agentName.trim()}>Connect an agent</button></form>}
                 {status.agentInvites?.map(i => <p className="browser-agent-waiting" key={i.name}>Waiting for <strong>{i.name}</strong> to connect · link expires at {new Date(i.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>)}
               </section>}
+              <section className="browser-settings" aria-label="Room settings"><h3>Room settings</h3>
+                {host ? <>
+                  <FloorControl floor={settings.floor} disabled={busy} onChange={floor => changeSettings({ floor }, floor === 'humans-first' ? 'Agents now reply only when addressed.' : 'Agents may now reply to every message from a person.')} />
+                  <label className="browser-setting"><input type="checkbox" checked={settings.agentAssignmentsWake} disabled={busy} onChange={e => changeSettings({ agentAssignmentsWake: e.target.checked }, e.target.checked ? 'Agents can now hand tasks to each other.' : 'Only people’s assignments wake agents now.')} /><span><strong>Agents can hand tasks to each other</strong>A task one agent assigns to another wakes it, as a person’s assignment does.</span></label>
+                  <label className="browser-setting"><input type="checkbox" checked={settings.guestAgentApproval} disabled={busy} onChange={e => changeSettings({ guestAgentApproval: e.target.checked }, e.target.checked ? 'Guests’ agents now wait for your approval.' : 'Guests’ agents now join right away.')} /><span><strong>Approve guests’ agents</strong>Agents connected by other people wait for you to admit them. Your own agents join right away.</span></label>
+                </> : <ul className="browser-settings-summary">
+                  <li>{settings.floor === 'humans-first' ? 'Agents reply only when addressed.' : 'Agents may reply to every message from a person.'}</li>
+                  <li>{settings.agentAssignmentsWake ? 'Agents can hand tasks to each other.' : 'Only people’s assignments wake agents.'}</li>
+                  <li>{settings.guestAgentApproval ? 'The host approves agents connected by guests.' : 'Agents join as soon as their link is used.'}</li>
+                </ul>}
+              </section>
               <section className="browser-invite"><h3>Invite someone</h3><p>New people wait for the host’s approval.</p><label className="sr-only" htmlFor="browser-invite-link">Room invite link</label><input id="browser-invite-link" readOnly value={invite} onFocus={e => e.target.select()} /></section>
               <section className="browser-device-section"><h3>Your devices</h3><p>Join as yourself from another browser.</p>
                 <details className="browser-link-device"><summary>Add another device</summary><p>Open this room link on your other device and choose <strong>Use my existing identity</strong>. Enter its code here.</p>

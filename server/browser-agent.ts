@@ -92,7 +92,8 @@ export class BrowserAgent {
   }
   messages(): Stored[] { return readJson(this.path('messages.json'), []); }
   members(): Members { return readJson(this.path('members.json'), { members: [], devices: [] }); }
-  settings(): { floor: Floor } { return readJson(this.path('settings.json'), { floor: 'humans-first' as Floor }); }
+  /** The room's rules as the host set them, copied from the room service by `run`. */
+  settings(): { floor: Floor; agentAssignmentsWake?: boolean } { return readJson(this.path('settings.json'), { floor: 'humans-first' as Floor }); }
   /** Verified task operations in arrival order; the board cursor is a position in this list. */
   taskOps(): TaskPacket[] { return readJson(this.path('tasks.json'), []); }
 
@@ -108,7 +109,8 @@ export class BrowserAgent {
         time: new Date(body.at).toISOString(), ...(body.replyTo ? { replyTo: body.replyTo } : {}), ...(mentions.length ? { mentions } : {}) };
     });
     const ops = this.taskOps();
-    return { memberId, participants, messages, floor: this.settings().floor, tasks: boardTasks(ops), boardRevision: ops.length };
+    const settings = this.settings();
+    return { memberId, participants, messages, floor: settings.floor, agentAssignmentsWake: !!settings.agentAssignmentsWake, tasks: boardTasks(ops), boardRevision: ops.length };
   }
 }
 
@@ -244,6 +246,7 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
       if (epoch && next.epoch !== epoch) { for (const p of peers.values()) await p.pc.close(); peers.clear(); cursor = 0; }
       epoch = next.epoch; status = next;
       writeJson(join(agent.dir, 'members.json'), { memberId: next.memberId, members: next.members || [], devices: (next.devices || []).map(d => ({ id: d.id, memberId: d.memberId })) });
+      if (next.settings) writeJson(join(agent.dir, 'settings.json'), { floor: next.settings.floor, agentAssignmentsWake: next.settings.agentAssignmentsWake });
       for (const signal of next.signals || []) cursor = Math.max(cursor, signal.seq);
       const available = (next.devices || []).filter(d => d.id !== identity.id && d.session);
       for (const [id, peer] of peers) {

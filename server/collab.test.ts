@@ -217,3 +217,19 @@ test('an operator-only agent ignores a person from the paired machine but answer
     expect(() => a.setAgentWake({ roomId, requestId: randomUUID(), agentId: agent.participantId, wake: 'sometimes' })).toThrow('anyone or operator');
   } finally { a.close(); b.close(); }
 });
+
+test('an agent’s assignment wakes another agent only when the room allows agents to hand work to each other', () => {
+  const roster = [
+    { id: 'igor', name: 'Igor', role: 'human' as const },
+    { id: 'opus', name: 'Opus', role: 'agent' as const },
+    { id: 'vesper', name: 'Vesper', role: 'agent' as const },
+  ];
+  const task = { id: randomUUID(), title: 'Review', notes: '', status: 'todo' as const, assigneeId: 'vesper', assignedBy: 'opus', assignedRevision: 1,
+    createdBy: 'opus', updatedBy: 'opus', updatedAt: new Date().toISOString(), revision: 1 };
+  const room = { floor: 'humans-first' as const, participants: roster, messages: [], tasks: [task], boardRevision: 1 };
+  expect(evaluateWake(room, 'vesper', undefined, 0).tasks).toEqual([]);
+  expect(evaluateWake({ ...room, agentAssignmentsWake: true }, 'vesper', undefined, 0).tasks).toHaveLength(1);
+  // The assignee's own "only my operator" setting still applies.
+  const guarded = { ...room, agentAssignmentsWake: true, participants: roster.map(p => p.id === 'vesper' ? { ...p, operatorId: 'igor', wake: 'operator' as const } : p) };
+  expect(evaluateWake(guarded, 'vesper', undefined, 0).tasks).toEqual([]);
+});

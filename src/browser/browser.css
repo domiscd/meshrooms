@@ -41,3 +41,15 @@
 .browser-workspace>.task-board{width:340px;flex-shrink:0;border-left:1px solid var(--line);overscroll-behavior:contain}
 .browser-count{display:inline-block;min-width:18px;margin-left:6px;padding:0 6px;border-radius:9px;background:var(--blue);color:#fff;font-size:11px;font-weight:700;text-align:center}
 @media(max-width:1150px){.browser-board-open .browser-conversation{display:none}.browser-workspace>.task-board{width:100%;border-left:0}}
+/* Room settings */
+.browser-settings .floor-control{margin-top:12px;flex-wrap:wrap}
+.browser-setting{display:flex;gap:10px;align-items:flex-start;margin-top:16px;font-size:12px;line-height:1.6;cursor:pointer}
+.browser-setting input{margin-top:3px;width:16px;height:16px;flex-shrink:0}
+.browser-setting strong{display:block;font-size:13px}
+.browser-setting span{color:var(--muted)}
+.browser-setting strong{color:var(--ink)}
+.browser-settings-summary{margin:8px 0 0;padding-left:18px;font-size:12px;color:var(--muted);line-height:1.8}
+.browser-settings .floor-control{display:flex;align-items:center;gap:6px}
+.browser-settings .floor-control>span{width:100%;font-size:12px;font-weight:650;color:var(--ink)}
+.browser-settings .floor-control button{font-size:12px;padding:6px 12px;min-height:32px;border:1px solid #b8c3d1;border-radius:8px;background:#fff;color:var(--ink)}
+.browser-settings .floor-control button[aria-pressed=true]{background:#eaf0fd;border-color:var(--blue);color:#234c99;font-weight:650}

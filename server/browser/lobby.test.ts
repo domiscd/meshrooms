@@ -330,3 +330,43 @@ test('keys of devices that left stay available to members, so their task changes
     expect((await sam.status(room)).formerDevices).toBeUndefined(); // not shown outside the room
   } finally { lobby.close(); }
 });
+
+test('the host controls room settings, and can require approval for guests’ agents', async () => {
+  const lobby = new BrowserLobby(':memory:', { origin });
+  try {
+    const host = await client(lobby), room = crypto.randomUUID();
+    await host.send('create', room, { title: 'Work', name: 'Alex', label: 'Desktop' });
+    const sam = await admitPerson(lobby, host, room, 'Sam');
+    expect((await sam.status(room)).settings).toEqual({ floor: 'humans-first', agentAssignmentsWake: false, guestAgentApproval: false });
+    await expect(sam.send('settings', room, { floor: 'open' })).rejects.toThrow('Only the host');
+    await expect(host.send('settings', room, { floor: 'loud' })).rejects.toThrow('when agents reply');
+    await expect(host.send('settings', room, { guestAgentApproval: 'yes' })).rejects.toThrow('on or off');
+    await host.send('settings', room, { guestAgentApproval: true, agentAssignmentsWake: true });
+    expect((await sam.status(room)).settings).toEqual({ floor: 'humans-first', agentAssignmentsWake: true, guestAgentApproval: true });
+
+    // A guest's agent waits for the host; the host's own agent joins right away.
+    const samAgent = await client(lobby), hostAgent = await client(lobby), orphan = await client(lobby);
+    const { token } = await sam.send('agent-invite', room, { name: 'Codex' }) as { token: string };
+    await samAgent.send('agent-redeem', room, { token, label: 'Windows node' });
+    const waiting = await samAgent.status(room);
+    expect(waiting.memberId).toBeUndefined();
+    expect(waiting.request).toMatchObject({ kind: 'agent', state: 'pending', name: 'Codex' });
+    const request = (await host.status(room)).requests!.find(r => r.kind === 'agent')!;
+    expect(request.operatorId).toBe((await sam.status(room)).memberId);
+    await host.send('decide', room, { requestId: request.id, admit: true });
+    const admitted = await samAgent.status(room);
+    expect(admitted.members!.find(m => m.id === admitted.memberId)).toMatchObject({ name: 'Codex', role: 'agent', operatorId: request.operatorId });
+    const { token: own } = await host.send('agent-invite', room, { name: 'Vesper' }) as { token: string };
+    await hostAgent.send('agent-redeem', room, { token: own, label: 'Mac node' });
+    expect((await hostAgent.status(room)).memberId).toBeDefined();
+
+    // A guest's agent still waiting leaves with its operator.
+    const { token: late } = await sam.send('agent-invite', room, { name: 'Grok' }) as { token: string };
+    await orphan.send('agent-redeem', room, { token: late, label: 'Linux node' });
+    expect((await host.status(room)).requests!.some(r => r.name === 'Grok')).toBe(true);
+    await host.send('remove', room, { deviceId: (await sam.status(room)).deviceId });
+    const after = await host.status(room);
+    expect(after.requests!.some(r => r.name === 'Grok')).toBe(false);
+    expect(after.members!.map(m => m.name)).toEqual(['Alex', 'Vesper']);
+  } finally { lobby.close(); }
+});
