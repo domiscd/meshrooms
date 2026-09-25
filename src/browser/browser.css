@@ -99,3 +99,4 @@
 .browser-rail-collapsed .browser-self{padding-inline:0;justify-content:center}
 }
 @media(max-width:760px){.browser-rail-toggle{display:none}.browser-rail-top{display:contents}}
+.browser-person>div>span.agent-runtime{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}

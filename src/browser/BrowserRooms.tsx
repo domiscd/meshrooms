@@ -140,6 +140,8 @@ export function BrowserRooms() {
     if (!isAgent(member) || !member!.operatorId) return undefined;
     return member!.operatorId === status?.memberId ? 'you' : status?.members?.find(m => m.id === member!.operatorId)?.name || 'a former member';
   };
+  /** "Claude Code · claude-opus-5-5", as the agent reported it. */
+  const runtimeOf = (member: BrowserMember | undefined) => isAgent(member) ? [member!.harness, member!.model].filter(Boolean).join(' · ') || undefined : undefined;
   const nameOf = (memberId: string) => status?.members?.find(m => m.id === memberId)?.name || 'Former member';
   /** Task changes read as quiet lines between messages, placed by time. They are local views, never sent. */
   const timeline = useMemo(() => taskTimeline(taskOps), [taskOps]);
@@ -515,7 +517,7 @@ export function BrowserRooms() {
                       {day}
                       <article id={`message-${body.id}`} className={`browser-message ${highlight === body.id ? 'browser-message-highlight' : ''} ${continuation ? 'browser-message-continuation' : ''} ${forYou ? 'browser-message-for-you' : ''} ${isAgent(member) ? 'browser-message-agent' : ''}`}>
                         <MemberAvatar member={member} roomId={urlRoom} fallback={author} />
-                        <div><header className={continuation ? 'sr-only' : ''}><strong>{author}</strong>{isAgent(member) && <span className="browser-role">agent</span>}{operator && <span className="browser-operator">for {operator}</span>}{body.memberId === status.memberId && <span className="browser-author-you">you</span>}<time dateTime={new Date(body.at).toISOString()}>{new Date(body.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                        <div><header className={continuation ? 'sr-only' : ''}><strong>{author}</strong>{isAgent(member) && <span className="browser-role" title={runtimeOf(member) ? `${runtimeOf(member)} (reported by the agent)` : 'Agent'}>agent</span>}{operator && <span className="browser-operator">for {operator}</span>}{body.memberId === status.memberId && <span className="browser-author-you">you</span>}<time dateTime={new Date(body.at).toISOString()}>{new Date(body.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
                           <button className="browser-reply-button" aria-label={`Reply to ${own ? 'your' : `${author}’s`} message`} title="Reply" onClick={() => startReply(body.id)}>Reply</button></header>
                           {body.replyTo && <p className="browser-reply-reference">{target ? <>Replying to <strong>{nameOf(target.memberId)}</strong>: {quoted!.length > 120 ? `${quoted!.slice(0, 120)}…` : quoted}</> : 'Replying to an earlier message'}</p>}
                           {shown && <div className="message-text"><MentionText text={shown} participants={participants} viewerId={status.memberId} /></div>}
@@ -555,6 +557,7 @@ export function BrowserRooms() {
                   const a = activities.get(member.id);
                   return <div className="browser-person" key={member.id}><span className="browser-person-avatar"><MemberAvatar member={member} roomId={urlRoom} fallback={member.name} />{a && <span className={`agent-dot is-${a.state}${a.state !== 'offline' && a.state !== 'online' && a.quiet !== undefined ? ' is-quiet' : ''}`} aria-hidden="true" />}</span><div><strong>{member.name}{member.id === status.memberId ? ' (you)' : ''}</strong>
                     <span>{isAgent(member) ? `Agent · operated by ${operatorOf(member)}` : `${member.id === status.ownerId ? 'Host · ' : ''}${devices} device${devices === 1 ? '' : 's'}`}</span>
+                    {isAgent(member) && <span className="agent-runtime" title="Reported by the agent">{runtimeOf(member) || 'Harness and model not reported'}</span>}
                     {a && activityLine(a)}
                     {a && a.state !== 'offline' && a.state !== 'online' && a.note && <span className="agent-activity-note">{a.note}</span>}
                     {removable && (confirming === member.id ? confirmRemove(member) : <button className="browser-remove" disabled={busy} aria-label={`Remove ${member.name} from the room`} onClick={() => setConfirming(member.id)}>{isAgent(member) ? 'Remove agent' : 'Remove'}</button>)}
