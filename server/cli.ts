@@ -7,6 +7,7 @@ import { fingerprint, isUuid, tokenHash } from './model';
 import { ensureRunning, probeRuntime, type RuntimeRecord } from './runtime';
 import type { NodeSnapshot } from '../src/room';
 import { evaluateWake, type WakeResult } from '../src/collab';
+import { BrowserAgent, listenBrowser, parseRoomUrl, runBridge, sendBrowser } from './browser-agent';
 
 type ClientCredential = { version: 1; nodeId: string; dataDir: string; intentId: string; token: string; title: string; project: string; agentName: string };
 function parse(args: string[]) {
@@ -18,7 +19,7 @@ function parse(args: string[]) {
     values[key] = value;
   }
   const allowed = ['--data-dir', '--library', '--port', '--dev-origin', '--title', '--project', '--agent', '--request-id', '--credential', '--text', '--after', '--wait-seconds', '--room', '--descriptor',
-    '--reply-to', '--board-after', '--task', '--revision', '--status', '--notes', '--assignee', '--id', '--out'];
+    '--reply-to', '--board-after', '--task', '--revision', '--status', '--notes', '--assignee', '--id', '--out', '--url', '--name'];
   for (const key of Object.keys(values)) if (!allowed.includes(key)) throw new Error(`Unknown option ${key}.`);
   return { command, values, attach };
 }
@@ -132,8 +133,33 @@ export async function runCli(args: string[]): Promise<unknown> {
     'listen --credential PATH [--after MESSAGE_ID] [--board-after BOARD_CURSOR] [--wait-seconds 30]',
     'tasks --credential PATH', 'task-add --credential PATH --request-id UUID --title TEXT [--notes TEXT] [--assignee me|PARTICIPANT_ID]',
     'task-update --credential PATH --request-id UUID --task TASK_ID --revision N [--status todo|doing|done] [--title TEXT] [--notes TEXT] [--assignee me|none|PARTICIPANT_ID]',
+    'browser-join --url ROOM_LINK --name NAME', 'browser-run --url ROOM_LINK', 'browser-listen --url ROOM_LINK [--after MESSAGE_ID] [--wait-seconds 30]',
+    'browser-send --url ROOM_LINK --request-id UUID --text TEXT [--reply-to MESSAGE_ID]',
     'transport', 'descriptor --room UUID', 'pair --descriptor PATH (operator-approved two-node development pairing)'],
     options: ['--data-dir PATH', '--library PATH', '--port NUMBER', '--dev-origin URL'], note: 'Browser links expire after two minutes. Agent credential files stay private on this machine.' };
+  if (command.startsWith('browser-')) {
+    // A local agent's own device in a hosted browser room; its key stays in the node data directory.
+    const { origin, roomId } = parseRoomUrl(requireText(values['--url'], '--url', 300));
+    const agent = new BrowserAgent(resolve(values['--data-dir'] || defaultOptions().dataDir), origin, roomId);
+    if (command === 'browser-join') {
+      const identity = await agent.ensureIdentity();
+      await agent.command('request', { name: requireText(values['--name'], '--name', 80), label: 'Meshrooms agent bridge', kind: 'person' });
+      const status = await agent.command('status', {});
+      return { state: status.request?.state ?? (status.memberId ? 'admitted' : 'unknown'), deviceId: identity.id, roomId, title: status.title,
+        next: 'Ask the host to admit this device, then keep `browser-run` running.' };
+    }
+    if (command === 'browser-run') { await runBridge(agent); return; }
+    if (command === 'browser-listen') {
+      const seconds = Number(values['--wait-seconds'] || 30);
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60) throw new Error('Use --wait-seconds between 1 and 60.');
+      return listenBrowser(agent, values['--after'], seconds);
+    }
+    if (command === 'browser-send') {
+      if (!isUuid(values['--request-id'])) throw new Error('Use --request-id with a UUID and retain it for uncertain retries.');
+      return sendBrowser(agent, requireText(values['--text'], '--text', 4000), values['--reply-to'], values['--request-id']);
+    }
+    throw new Error(`Unknown command ${command}. Run help.`);
+  }
   const agentCommands = ['read', 'send', 'listen', 'tasks', 'task-add', 'task-update', 'attachment'];
   if (attach.length && command !== 'send') throw new Error('Use --attach only with send.');
   if (!['status', 'ensure', 'open', 'start', 'transport', 'descriptor', 'pair', ...agentCommands].includes(command)) throw new Error(`Unknown command ${command}. Run help.`);
