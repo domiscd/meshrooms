@@ -70,13 +70,26 @@ test('compaction keeps the same board with far fewer operations', () => {
     ops.push(body); return body.taskId;
   };
   const a = apply(alex, { title: 'A', assigneeId: codex }), b = apply(sam, { title: 'B' }), c = apply(sam, { title: 'C' });
-  for (let i = 0; i < 40; i++) apply(i % 2 ? alex : sam, { status: (['todo', 'doing', 'done'] as const)[i % 3], notes: `step ${i}` }, a);
+  for (let i = 0; i < 120; i++) apply(i % 2 ? alex : sam, { status: (['todo', 'doing', 'done'] as const)[i % 3], notes: `step ${i}` }, a);
   apply(sam, { assigneeId: sam }, b); apply(alex, { assigneeId: null }, b); apply(alex, { assigneeId: sam }, b); apply(sam, { status: 'doing' }, b);
   apply(alex, {}, c, true);
   const packets = ops.map(body => ({ body, signature: 's' }));
   const compacted = compactBoard(packets);
-  expect(compacted.length).toBeLessThan(12);
+  expect(compacted.length).toBeLessThan(40);
   expect(foldBoard(compacted.map(p => p.body))).toEqual(foldBoard(ops));
   expect(foldBoard(ops).find(t => t.id === b)).toMatchObject({ assigneeId: sam, assignedBy: alex });
   expect(compactBoard(compacted)).toEqual(compacted);
+});
+
+test("Copilot's review: a late concurrent edit decides the same way on compacted and full boards", () => {
+  const ops: TaskBody[] = [op(alex, { title: 'Late edits', assigneeId: codex })];
+  for (let i = 0; i < 80; i++) ops.push(op(i % 2 ? alex : sam, { notes: `step ${i}` }, foldBoard(ops)[0]));
+  const compacted = compactBoard(ops.map(body => ({ body, signature: 's' }))).map(p => p.body);
+  expect(compacted.length).toBeLessThan(ops.length);
+  // An offline peer's edit made at an older revision reassigns the task; its id loses or wins against the kept winner.
+  const at = ops[ops.length - 5];
+  for (const id of ['00000000-0000-4000-8000-000000000000', 'ffffffff-ffff-4fff-bfff-ffffffffffff']) {
+    const late = { ...at, id, memberId: sam, assigneeId: sam, notes: 'offline edit' };
+    expect(foldBoard([...compacted, late])).toEqual(foldBoard([...ops, late]));
+  }
 });

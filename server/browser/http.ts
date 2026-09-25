@@ -90,7 +90,7 @@ export function browserHandler(lobby: BrowserLobby, origin: string, distDir: str
         const body = agentPage[2] ? text : explainerHtml(text, room.roomId);
         return new Response(request.method === 'HEAD' ? null : body, { headers: { ...headers, 'Content-Type': agentPage[2] ? 'text/markdown; charset=utf-8' : 'text/html; charset=utf-8' } });
       }
-      const route =url.pathname === '/rooms' || /^\/r\/[a-f0-9-]{36}$/.test(url.pathname);
+      const route = url.pathname === '/rooms' || /^\/r\/[a-f0-9-]{36}$/.test(url.pathname);
       const relative = route ? 'index.html' : url.pathname.replace(/^\//, '');
       if (!route && !/^assets\/[a-zA-Z0-9_.-]+$/.test(relative)) return json({ error: 'Not found.' }, 404);
       const path = resolve(root, relative);

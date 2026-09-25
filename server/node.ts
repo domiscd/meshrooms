@@ -383,7 +383,11 @@ export class LocalNode {
     for (const person of descriptor.participants) {
       const prior = next.participants.find(p => p.id === person.id);
       if (prior && (prior.state !== 'remote' || prior.peerKey !== descriptor.peerKey || prior.name !== person.name || prior.role !== person.role
-        || (prior.operatorId && person.operatorId && prior.operatorId !== person.operatorId))) throw new NodeError(409, 'A participant identity conflicts with this node.');
+        || (prior.operatorId && person.operatorId && prior.operatorId !== person.operatorId)
+        || (prior.machine && descriptor.machine && prior.machine !== descriptor.machine))) throw new NodeError(409, 'A participant identity conflicts with this node.');
+      // A participant already known from another room gains attribution it lacked, never a different one.
+      if (prior && person.operatorId && !prior.operatorId) prior.operatorId = person.operatorId;
+      if (prior && descriptor.machine && !prior.machine) prior.machine = descriptor.machine;
       if (!prior) next.participants.push({ id: person.id, name: person.name, role: person.role, state: 'remote', peerKey: descriptor.peerKey, detail: 'Remote room member · presence not tracked',
         ...(person.operatorId ? { operatorId: person.operatorId } : {}), ...(descriptor.machine ? { machine: descriptor.machine } : {}) });
     }

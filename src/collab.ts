@@ -101,9 +101,13 @@ export function assignmentWakes(room: RoomView, task: Task, agentId: string): bo
   return (room.floor ?? DEFAULT_FLOOR) === 'open' || assigner === 'human' || (!!room.agentAssignmentsWake && assigner === 'agent');
 }
 
-/** An agent may speak when replying to a message that woke it, or while holding open work a person assigned. */
+/**
+ * An agent may speak when replying to a message that woke it, or while holding open work a person assigned. An open
+ * floor lets agents speak freely, except one set to operator-only: it still speaks only on its operator's behalf.
+ */
 export function mayAgentSpeak(room: RoomView, agentId: string, replyTo: string | undefined): boolean {
-  if ((room.floor ?? DEFAULT_FLOOR) === 'open') return true;
+  const operatorOnly = room.participants.find(p => p.id === agentId)?.wake === 'operator';
+  if ((room.floor ?? DEFAULT_FLOOR) === 'open' && !operatorOnly) return true;
   const target = replyTo ? room.messages.find(m => m.id === replyTo) : undefined;
   if (target && wakes(room, target, agentId)) return true;
   return (room.tasks || []).some(task => assignmentWakes(room, task, agentId));

@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSyn
 import { join, resolve } from 'node:path';
 import { RTCPeerConnection, type RTCDataChannel } from 'werift';
 import { browserProtocol, type BrowserDevice, type Command, type RoomStatus } from '../src/browser/protocol';
-import { foldBoard, MAX_TASK_OPS, syncChunks, taskBody, validTaskBody, type BoardSync, type TaskChange, type TaskPacket } from '../src/browser/board';
+import { COMPACT_AT, compactBoard, foldBoard, MAX_TASK_OPS, syncChunks, taskBody, validTaskBody, type BoardSync, type TaskChange, type TaskPacket } from '../src/browser/board';
 import { evaluateWake, mayAgentSpeak, mentionedIds, type Floor, type Task } from '../src/collab';
 import type { Message, Participant } from '../src/room';
 
@@ -27,6 +27,8 @@ type Stored = { packet: { body: MessageBody; signature: string }; targets: strin
 type Members = { memberId?: string; members: { id: string; name: string; role?: 'human' | 'agent'; operatorId?: string }[]; devices: { id: string; memberId: string }[] };
 /** A queued task change; `run` applies it to the board as it stands when signing, so the revision is current. */
 type TaskIntent = { type: 'task'; id: string; taskId: string; change: TaskChange; removed?: boolean };
+/** A stored task operation and the board cursor at which it arrived. */
+type StoredOp = TaskPacket & { seq: number };
 type Peer = { pc: RTCPeerConnection; session: string; channel?: RTCDataChannel; started: number };
 
 const b64 = (bytes: ArrayBuffer | Uint8Array) => Buffer.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).toString('base64');
@@ -44,6 +46,16 @@ export function parseRoomUrl(url: string) {
   if (parsed.protocol !== 'https:' && !['127.0.0.1', 'localhost'].includes(parsed.hostname)) throw new Error('Use the HTTPS room link.');
   if (!match) throw new Error('Use a browser room link like https://host/r/<room id>.');
   return { origin: parsed.origin, roomId: match[1] };
+}
+
+/** An agent connect link made by a person in the room: https://host/agent/<room>#<one-time token>. */
+export function parseConnectLink(link: string) {
+  const url = new URL(link);
+  const match = /^\/agent\/([a-f0-9-]{36})$/.exec(url.pathname);
+  const token = url.hash.slice(1);
+  if (url.protocol !== 'https:' && !['127.0.0.1', 'localhost'].includes(url.hostname)) throw new Error('Use the HTTPS connect link.');
+  if (!match || !/^[A-Za-z0-9_-]{32,64}$/.test(token)) throw new Error('This is not a Meshrooms agent connect link (https://host/agent/<room>#<token>).');
+  return { origin: url.origin, roomId: match[1], token };
 }
 
 /** One agent's membership in one browser room. */
@@ -94,8 +106,10 @@ export class BrowserAgent {
   members(): Members { return readJson(this.path('members.json'), { members: [], devices: [] }); }
   /** The room's rules as the host set them, copied from the room service by `run`. */
   settings(): { floor: Floor; agentAssignmentsWake?: boolean } { return readJson(this.path('settings.json'), { floor: 'humans-first' as Floor }); }
-  /** Verified task operations in arrival order; the board cursor is a position in this list. */
-  taskOps(): TaskPacket[] { return readJson(this.path('tasks.json'), []); }
+  /** Verified task operations in arrival order, each with the board cursor at which it arrived. */
+  taskOps(): StoredOp[] { return readJson<StoredOp[]>(this.path('tasks.json'), []).map((p, i) => ({ ...p, seq: p.seq ?? i + 1 })); }
+  /** Arrivals so far. Compaction drops operations but never moves the cursor back, so later assignments still wake. */
+  boardCursor(ops = this.taskOps()) { return Math.max(readJson(this.path('board.json'), { seq: 0 }).seq, ops.at(-1)?.seq ?? 0); }
 
   /** The room as local-room shapes, so collab.ts rules apply unchanged. */
   view() {
@@ -110,7 +124,7 @@ export class BrowserAgent {
     });
     const ops = this.taskOps();
     const settings = this.settings();
-    return { memberId, participants, messages, floor: settings.floor, agentAssignmentsWake: !!settings.agentAssignmentsWake, tasks: boardTasks(ops), boardRevision: ops.length };
+    return { memberId, participants, messages, floor: settings.floor, agentAssignmentsWake: !!settings.agentAssignmentsWake, tasks: boardTasks(ops), boardRevision: this.boardCursor(ops) };
   }
 }
 
@@ -118,12 +132,12 @@ export class BrowserAgent {
  * The folded board, with assignedRevision rewritten as the board cursor at which this device received the assigning
  * operation. Task revisions count per task, but wake cursors must count across the room, like local rooms.
  */
-export function boardTasks(ops: TaskPacket[]): Task[] {
+export function boardTasks(ops: (TaskPacket & { seq?: number })[]): Task[] {
   return foldBoard(ops.map(p => p.body)).map(task => {
     if (!task.assigneeId) return task;
     let position = 0;
     ops.forEach((p, index) => { const b = p.body;
-      if (b.taskId === task.id && b.revision === task.assignedRevision && b.assigneeId === task.assigneeId && b.memberId === task.assignedBy) position = index + 1; });
+      if (b.taskId === task.id && b.revision === task.assignedRevision && b.assigneeId === task.assigneeId && b.memberId === task.assignedBy) position = p.seq ?? index + 1; });
     return { ...task, assignedRevision: position };
   });
 }
@@ -136,7 +150,13 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
   let serial: Promise<unknown> = Promise.resolve();
   const transaction = <T>(work: () => Promise<T>) => { const next = serial.then(work); serial = next.catch(() => {}); return next; };
   const save = (messages: Stored[]) => writeJson(join(agent.dir, 'messages.json'), messages);
-  const saveOps = (ops: TaskPacket[]) => writeJson(join(agent.dir, 'tasks.json'), ops);
+  /** Append verified operations at the next cursors; a large board is compacted like a browser's, without moving the cursor. */
+  const storeOps = (ops: StoredOp[], added: TaskPacket[]) => {
+    let seq = agent.boardCursor(ops);
+    let next: StoredOp[] = [...ops, ...added.map(p => ({ ...p, seq: ++seq }))];
+    if (next.length > COMPACT_AT) { writeJson(join(agent.dir, 'board.json'), { seq }); next = compactBoard(next); }
+    writeJson(join(agent.dir, 'tasks.json'), next);
+  };
   /** Keep a task operation signed by a current device of its author; duplicates and a full board are ignored. */
   const acceptOps = async (packets: unknown[]) => {
     const ops = agent.taskOps(); const known = new Set(ops.map(p => p.body.id)); const added: TaskPacket[] = [];
@@ -149,7 +169,7 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
       if (!author || author.memberId !== b.memberId || !await agent.verify(author.publicKey, b, packet.signature)) continue;
       known.add(b.id); added.push({ body: b, signature: packet.signature });
     }
-    if (added.length) saveOps([...ops, ...added]);
+    if (added.length) storeOps(ops, added);
   };
 
   const flush = () => {
@@ -165,7 +185,7 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
       if (state !== 'open') return;
       log(`channel open to ${id.slice(0, 8)}`);
       // Exchange boards so either side catches up on tasks changed while apart.
-      for (const chunk of syncChunks(agent.roomId, agent.taskOps())) channel.send(JSON.stringify(chunk));
+      for (const chunk of syncChunks(agent.roomId, agent.taskOps().map(({ body, signature }) => ({ body, signature })))) channel.send(JSON.stringify(chunk));
       flush();
     });
     channel.onMessage.subscribe(raw => void transaction(async () => {
@@ -221,7 +241,7 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
           if (creating || current) { // A task someone removed meanwhile is not recreated by an update.
             const body = { ...taskBody({ roomId: agent.roomId, deviceId: identity.id, memberId: status.memberId, current, taskId: item.taskId, change: item.change, removed: item.removed }), id: item.id };
             const packet = { body, signature: await agent.sign(body) };
-            saveOps([...ops, packet]);
+            storeOps(ops, [packet]);
             for (const peer of peers.values()) if (peer.channel?.readyState === 'open') peer.channel.send(JSON.stringify(packet));
           }
         }
@@ -329,7 +349,7 @@ export async function taskBrowser(agent: BrowserAgent, input: { requestId: strin
     const pending = readdirSync(join(agent.dir, 'outbox')).some(f => f.endsWith(`-${input.requestId}.json`));
     const ops = agent.taskOps();
     if (ops.some(p => p.body.id === input.requestId)) {
-      return { taskId, status: 'shared', removed: !!input.removed, task: boardTasks(ops).find(t => t.id === taskId) ?? null, boardCursor: ops.length };
+      return { taskId, status: 'shared', removed: !!input.removed, task: boardTasks(ops).find(t => t.id === taskId) ?? null, boardCursor: agent.boardCursor(ops) };
     }
     if (!pending) return { taskId, status: 'dropped', reason: 'Someone removed the task before this change was signed.' };
     await Bun.sleep(300);

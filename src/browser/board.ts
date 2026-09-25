@@ -15,6 +15,8 @@ export type BoardSync = { kind: 'board'; roomId: string; ops: TaskPacket[] };
 export type TaskChange = { title?: string; notes?: string; status?: TaskStatus; assigneeId?: string | null };
 
 export const MAX_TASK_OPS = 2000;
+/** Devices compact their board past this many operations, keeping it well under MAX_TASK_OPS. */
+export const COMPACT_AT = 1000;
 /** Data channel messages over 20,000 characters are dropped, so exchanged boards are split well below that. */
 export const SYNC_CHUNK_CHARS = 15_000;
 const id = (value: unknown) => typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
@@ -70,12 +72,15 @@ export function foldBoard(ops: TaskBody[]): Task[] {
   return tasks.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1)).map(({ createdAt: _, ...task }) => task);
 }
 
+/** Late edits trail a task by a few revisions; this many recent steps per task keep deciding them after compaction. */
+const KEPT_TAIL = 32;
+
 /**
  * Drops operations no longer needed to fold the same board, so a busy room stays under MAX_TASK_OPS. Per task it keeps
- * the first and last chain steps and the steps around the assignment; a removed task keeps one removal. Operations are
- * only dropped, never rewritten, so every signature still verifies and task content converges whatever each device
- * compacted. One known gap: a losing concurrent edit that first arrives after its revision's winner was compacted away
- * can shift who is credited with the assignment on that device. Callers compact only when the board grows large.
+ * the first chain step, the steps around the assignment and the last KEPT_TAIL steps; a removed task keeps one removal.
+ * Operations are only dropped, never rewritten, so every signature still verifies. A late edit at a kept revision wins or
+ * loses exactly as it would against the full history, so task content always converges; assignment credit converges
+ * too unless an edit arrives more than KEPT_TAIL revisions late. Callers compact only when the board grows large.
  */
 export function compactBoard<T extends { body: TaskBody }>(packets: T[]): T[] {
   const keep = new Set<string>();
@@ -83,7 +88,8 @@ export function compactBoard<T extends { body: TaskBody }>(packets: T[]): T[] {
     const removal = [...list].sort(compare).find(op => op.removed);
     if (removal) { keep.add(removal.id); continue; }
     const steps = chain(list), at = assignmentIndex(steps);
-    for (const index of [0, at - 1, at, steps.length - 1]) if (index >= 0) keep.add(steps[index].id);
+    for (const index of [0, at - 1, at]) if (index >= 0) keep.add(steps[index].id);
+    for (let index = Math.max(at, steps.length - KEPT_TAIL); index < steps.length; index++) keep.add(steps[index].id);
   }
   return packets.filter(p => keep.has(p.body.id));
 }

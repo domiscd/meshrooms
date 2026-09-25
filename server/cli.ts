@@ -7,7 +7,7 @@ import { fingerprint, isUuid, tokenHash } from './model';
 import { ensureRunning, probeRuntime, type RuntimeRecord } from './runtime';
 import type { NodeSnapshot } from '../src/room';
 import { evaluateWake, type WakeResult } from '../src/collab';
-import { BrowserAgent, listenBrowser, parseRoomUrl, runBridge, sendBrowser } from './browser-agent';
+import { BrowserAgent, listenBrowser, parseConnectLink, parseRoomUrl, runBridge, sendBrowser } from './browser-agent';
 
 type ClientCredential = { version: 1; nodeId: string; dataDir: string; intentId: string; token: string; title: string; project: string; agentName: string };
 function parse(args: string[]) {
@@ -133,21 +133,27 @@ export async function runCli(args: string[]): Promise<unknown> {
     'listen --credential PATH [--after MESSAGE_ID] [--board-after BOARD_CURSOR] [--wait-seconds 30]',
     'tasks --credential PATH', 'task-add --credential PATH --request-id UUID --title TEXT [--notes TEXT] [--assignee me|PARTICIPANT_ID]',
     'task-update --credential PATH --request-id UUID --task TASK_ID --revision N [--status todo|doing|done] [--title TEXT] [--notes TEXT] [--assignee me|none|PARTICIPANT_ID]',
-    'browser-join --url ROOM_LINK --name NAME', 'browser-run --url ROOM_LINK', 'browser-listen --url ROOM_LINK [--after MESSAGE_ID] [--wait-seconds 30]',
+    'browser-join --link AGENT_LINK', 'browser-run --url ROOM_LINK', 'browser-listen --url ROOM_LINK [--after MESSAGE_ID] [--wait-seconds 30]',
     'browser-send --url ROOM_LINK --request-id UUID --text TEXT [--reply-to MESSAGE_ID]',
     'transport', 'descriptor --room UUID', 'pair --descriptor PATH (operator-approved two-node development pairing)'],
     options: ['--data-dir PATH', '--library PATH', '--port NUMBER', '--dev-origin URL'], note: 'Browser links expire after two minutes. Agent credential files stay private on this machine.' };
+  if (command === 'browser-join') {
+    // Agents join only through an agent link a person in the room made, so the room shows who operates them.
+    const { origin, roomId, token } = parseConnectLink(requireText(values['--link'], '--link', 400));
+    const agent = new BrowserAgent(resolve(values['--data-dir'] || defaultOptions().dataDir), origin, roomId);
+    const identity = await agent.ensureIdentity();
+    let status = await agent.command('status', { session: randomUUID() }).catch(() => ({} as any));
+    if (!status.memberId) {
+      await agent.command('agent-redeem', { token, label: 'Meshrooms agent bridge' });
+      status = await agent.command('status', { session: randomUUID() }).catch(() => ({} as any));
+    }
+    return { state: status.memberId ? 'admitted' : 'waiting-for-host', deviceId: identity.id, roomId, title: status.title,
+      next: `Keep browser-run --url ${origin}/r/${roomId} running.` };
+  }
   if (command.startsWith('browser-')) {
     // A local agent's own device in a hosted browser room; its key stays in the node data directory.
     const { origin, roomId } = parseRoomUrl(requireText(values['--url'], '--url', 300));
     const agent = new BrowserAgent(resolve(values['--data-dir'] || defaultOptions().dataDir), origin, roomId);
-    if (command === 'browser-join') {
-      const identity = await agent.ensureIdentity();
-      await agent.command('request', { name: requireText(values['--name'], '--name', 80), label: 'Meshrooms agent bridge', kind: 'person' });
-      const status = await agent.command('status', {});
-      return { state: status.request?.state ?? (status.memberId ? 'admitted' : 'unknown'), deviceId: identity.id, roomId, title: status.title,
-        next: 'Ask the host to admit this device, then keep `browser-run` running.' };
-    }
     if (command === 'browser-run') { await runBridge(agent); return; }
     if (command === 'browser-listen') {
       const seconds = Number(values['--wait-seconds'] || 30);

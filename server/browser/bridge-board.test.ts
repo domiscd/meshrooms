@@ -1,6 +1,9 @@
 import { expect, test } from 'bun:test';
 import { taskBody, type TaskPacket } from '../../src/browser/board';
-import { boardTasks } from '../browser-agent';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { BrowserAgent, boardTasks } from '../browser-agent';
 
 const roomId = crypto.randomUUID(), alex = crypto.randomUUID(), codex = crypto.randomUUID();
 const packet = (body: ReturnType<typeof taskBody>): TaskPacket => ({ body, signature: '' });
@@ -16,4 +19,20 @@ test('assignments carry the board cursor at which this device received them, not
   const [, assigned] = boardTasks(ops);
   const status = packet(taskBody({ roomId, deviceId: 'a'.repeat(64), memberId: codex, current: assigned, change: { status: 'doing' } }));
   expect(boardTasks([...ops, status])[1]).toMatchObject({ status: 'doing', assignedRevision: 3 });
+});
+
+test("Copilot's review: the bridge's board cursor keeps growing after compaction drops operations", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bridge-board-'));
+  try {
+    const agent = new BrowserAgent(dir, 'https://example.test', roomId);
+    const create = packet(taskBody({ roomId, deviceId: 'a'.repeat(64), memberId: alex, change: { title: 'Fix header', assigneeId: codex } }));
+    // An older tasks.json has no cursors: positions are the arrival order, as before.
+    writeFileSync(join(agent.dir, 'tasks.json'), JSON.stringify([create]));
+    expect(agent.boardCursor()).toBe(1);
+    // After compaction the kept operation keeps its cursor and board.json remembers every arrival so far.
+    writeFileSync(join(agent.dir, 'tasks.json'), JSON.stringify([{ ...create, seq: 1180 }]));
+    writeFileSync(join(agent.dir, 'board.json'), JSON.stringify({ seq: 1201 }));
+    expect(agent.boardCursor()).toBe(1201);
+    expect(boardTasks(agent.taskOps())[0]).toMatchObject({ assigneeId: codex, assignedRevision: 1180 });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

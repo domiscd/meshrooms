@@ -1,5 +1,5 @@
 import type { Task } from '../collab';
-import { MAX_TASK_OPS, compactBoard, foldBoard, syncChunks, taskBody, validTaskBody, type TaskChange, type TaskPacket } from './board';
+import { COMPACT_AT, MAX_TASK_OPS, compactBoard, foldBoard, syncChunks, taskBody, validTaskBody, type TaskChange, type TaskPacket } from './board';
 import { verify, type BrowserDevice, type RoomStatus } from './protocol';
 import { BrowserApi } from './client';
 import { read, sign, write } from './storage';
@@ -11,8 +11,6 @@ type ReceiptBody = { kind: 'receipt'; roomId: string; id: string; deviceId: stri
 type Packet = { body: MessageBody | ReceiptBody | TaskPacket['body']; signature: string };
 export type SavedMessage = { packet: Packet & { body: MessageBody }; targets: string[]; receipts: string[] };
 type Peer = { pc: RTCPeerConnection; session: string; channel?: RTCDataChannel; started: number };
-
-const COMPACT_AT = 1000;
 
 /** Real browser data channels; the lobby carries connection descriptions only. */
 export class BrowserPeers {

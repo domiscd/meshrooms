@@ -254,9 +254,14 @@ test('agent links are capped per person, and agents leave with their operator', 
     await hostAgent.send('agent-redeem', room, { token: vesper, label: 'Mac node' });
     const { token: codex } = await sam.send('agent-invite', room, { name: 'Codex' }) as { token: string };
     await samAgent.send('agent-redeem', room, { token: codex, label: 'Windows node' });
-    for (const name of ['A1', 'A2', 'A3', 'A4']) await sam.send('agent-invite', room, { name });
+    const links: string[] = [];
+    for (const name of ['A1', 'A2', 'A3', 'A4']) links.push((await sam.send('agent-invite', room, { name }) as { token: string }).token);
     await expect(sam.send('agent-invite', room, { name: 'A5' })).rejects.toThrow('four unused agent links');
-    expect((await host.status(room)).members!.map(m => [m.name, m.role ?? 'human'])).toEqual([['Alex', 'human'], ['Sam', 'human'], ['Vesper', 'agent'], ['Codex', 'agent']]);
+    // Vesper's review: links made while Sam had fewer agents cannot take Sam past four once they are used.
+    for (const token of links.slice(0, 3)) await (await client(lobby)).send('agent-redeem', room, { token, label: 'Extra' });
+    await expect((await client(lobby)).send('agent-redeem', room, { token: links[3], label: 'Extra' })).rejects.toThrow('already has four agents');
+    expect((await host.status(room)).members!.map(m => [m.name, m.role ?? 'human'])).toEqual([['Alex', 'human'], ['Sam', 'human'], ['Vesper', 'agent'], ['Codex', 'agent'],
+      ['A1', 'agent'], ['A2', 'agent'], ['A3', 'agent']]);
 
     // The host removes Sam's only device: Sam's agent and unused links go too; the host's agent stays.
     await host.send('remove', room, { deviceId: (await sam.status(room)).deviceId });

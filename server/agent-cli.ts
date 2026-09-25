@@ -19,21 +19,14 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
-import { BrowserAgent, listenBrowser, runBridge, sendBrowser, taskBrowser } from './browser-agent';
+import { BrowserAgent, listenBrowser, parseConnectLink, runBridge, sendBrowser, taskBrowser } from './browser-agent';
+
+export { parseConnectLink };
 import { TASK_STATUSES, type TaskStatus } from '../src/collab';
 import { sniff } from './attachments';
 
 const home = () => resolve(process.env.MESHROOMS_AGENT_HOME || join(homedir(), '.meshrooms', 'agents'));
 const uuid = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9-]{36}$/i.test(v);
-
-export function parseConnectLink(link: string) {
-  const url = new URL(link);
-  const match = /^\/agent\/([a-f0-9-]{36})$/.exec(url.pathname);
-  const token = url.hash.slice(1);
-  if (url.protocol !== 'https:' && !['127.0.0.1', 'localhost'].includes(url.hostname)) throw new Error('Use the HTTPS connect link.');
-  if (!match || !/^[A-Za-z0-9_-]{32,64}$/.test(token)) throw new Error('This is not a Meshrooms agent connect link (https://host/agent/<room>#<token>).');
-  return { origin: url.origin, roomId: match[1], token };
-}
 
 function args(argv: string[]) {
   const [command = 'help', ...rest] = argv; const values: Record<string, string> = {}; const positional: string[] = [];

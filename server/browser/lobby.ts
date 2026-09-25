@@ -141,6 +141,10 @@ export class BrowserLobby {
             const invite = typeof token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(token) ? invites.find(i => i.tokenHash === tokenHash(token)) : undefined;
             if (!invite || !isPerson(room, invite.operatorId)) fail(410, 'This agent link was already used or has expired. Ask for a new one.');
             nameAvailable(room, invite.name);
+            // Checked again here: links made before the operator's earlier agents joined must not exceed the limit.
+            const operated = room.members.filter(m => m.role === 'agent' && m.operatorId === invite.operatorId).length
+              + room.requests.filter(r => r.kind === 'agent' && r.state === 'pending' && r.expiresAt > this.now() && r.operatorId === invite.operatorId).length;
+            if (operated >= AGENTS_PER_OPERATOR) fail(429, 'The person who made this link already has four agents in this room.');
             if (room.devices.length >= 16) fail(429, 'This room has reached its device limit.');
             room.invites = invites.filter(i => i !== invite);
             room.requests = room.requests.filter(r => r.device.id !== id);

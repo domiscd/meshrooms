@@ -5,7 +5,7 @@ import { createHandler } from './http';
 import { NodeAccess } from './access';
 import { testStartupManager } from './startup';
 import { tokenHash } from './model';
-import { evaluateWake, mentionSegments, mentionedIds } from '../src/collab';
+import { evaluateWake, mayAgentSpeak, mentionSegments, mentionedIds } from '../src/collab';
 import type { Message } from '../src/room';
 
 const people = [
@@ -193,6 +193,20 @@ test('the node grants local agents an operator, carries it in descriptors, and l
     const other = descriptor.participants.find(p => p.role === 'human')!;
     expect(() => b.pairRoom({ ...descriptor, participants: descriptor.participants.map(p => p.role === 'agent' ? { ...p, operatorId: randomUUID() } : p) }, 'b'.repeat(64))).toThrow();
     expect(() => b.pairRoom({ ...descriptor, machine: 'Elsewhere' }, 'b'.repeat(64))).toThrow('different machine');
+    // Copilot's review: the same people paired into another room keep their attribution and cannot change machine.
+    const later = randomUUID(), third = randomUUID();
+    b.createRoom({ title: 'Later', requestId: later }); b.createRoom({ title: 'Third', requestId: third });
+    expect(() => b.pairRoom({ ...descriptor, roomId: third, machine: 'Elsewhere' }, 'b'.repeat(64))).toThrow('conflicts');
+    b.pairRoom({ ...legacy, roomId: later }, 'b'.repeat(64));
+    expect(b.snapshot().rooms.find(r => r.id === later)!.participants.find(p => p.id === agent.participantId)).toMatchObject({ operatorId: a.owner.participantId, machine: 'Test' });
+    // A node that first met them without attribution gains it when they are paired into another room.
+    const c = memoryNode().node;
+    try {
+      agentRoom(c, 'Gemini'); c.createRoom({ title: 'First', requestId: roomId }); c.createRoom({ title: 'Second', requestId: later });
+      c.pairRoom(legacy, 'c'.repeat(64));
+      c.pairRoom({ ...descriptor, roomId: later }, 'c'.repeat(64));
+      expect(c.snapshot().rooms.find(r => r.id === roomId)!.participants.find(p => p.id === agent.participantId)).toMatchObject({ operatorId: a.owner.participantId, machine: 'Test' });
+    } finally { c.close(); }
     expect(other.role).toBe('human');
     expect(roomB.roomId).not.toBe(roomId);
   } finally { a.close(); b.close(); }
@@ -232,4 +246,22 @@ test('an agent’s assignment wakes another agent only when the room allows agen
   // The assignee's own "only my operator" setting still applies.
   const guarded = { ...room, agentAssignmentsWake: true, participants: roster.map(p => p.id === 'vesper' ? { ...p, operatorId: 'igor', wake: 'operator' as const } : p) };
   expect(evaluateWake(guarded, 'vesper', undefined, 0).tasks).toEqual([]);
+});
+
+test("Copilot's review: an open floor does not let an operator-only agent speak for someone else", () => {
+  const participants = [
+    { id: 'igor', name: 'Igor', role: 'human' as const },
+    { id: 'ana', name: 'Ana', role: 'human' as const },
+    { id: 'codex', name: 'Codex', role: 'agent' as const, operatorId: 'igor', wake: 'operator' as const },
+  ];
+  const at = new Date().toISOString();
+  const messages: Message[] = [
+    { id: 'm1', authorId: 'ana', author: 'Ana', role: 'human', text: 'What do you think?', time: at },
+    { id: 'm2', authorId: 'igor', author: 'Igor', role: 'human', text: 'Thoughts?', time: at },
+  ];
+  const room = { floor: 'open' as const, participants, messages, tasks: [] };
+  expect(mayAgentSpeak(room, 'codex', 'm1')).toBe(false);
+  expect(mayAgentSpeak(room, 'codex', undefined)).toBe(false);
+  expect(mayAgentSpeak(room, 'codex', 'm2')).toBe(true);
+  expect(mayAgentSpeak({ ...room, participants: participants.map(p => ({ ...p, wake: 'anyone' as const })) }, 'codex', 'm1')).toBe(true);
 });
