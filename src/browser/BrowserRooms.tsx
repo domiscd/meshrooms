@@ -20,7 +20,7 @@ const urlRoom = location.pathname.match(/^\/r\/([a-f0-9-]{36})$/)?.[1] || '';
 type ChosenFile = PendingFile & { ref?: AttachmentRef; bytes?: Uint8Array };
 const fileNames = (body: SavedMessage['packet']['body']) => body.attachments?.map(a => a.name).join(', ') || '';
 
-function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send' | 'tasks' | 'clip' }) {
+function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send' | 'tasks' | 'clip' | 'plus' | 'collapse' | 'expand' }) {
   const paths = {
     people: <><circle cx="9" cy="8" r="3" /><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M21 21v-3a6 6 0 0 0-3-5" /></>,
     link: <><path d="m10 14 4-4M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M16 8l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" /></>,
@@ -29,6 +29,9 @@ function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send
     send: <path d="m4 12 8-8 8 8M12 4v16" />,
     tasks: <path d="M10 6h10M10 12h10M10 18h10M4 6l1.5 1.5L8 5M4 12l1.5 1.5L8 11M4 18l1.5 1.5L8 17" />,
     clip: <path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L14.5 7" />,
+    plus: <path d="M12 5v14M5 12h14" />,
+    collapse: <path d="m11 17-5-5 5-5M18 17l-5-5 5-5" />,
+    expand: <path d="m13 17 5-5-5-5M6 17l5-5-5-5" />,
   };
   return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[kind]}</svg>;
 }
@@ -102,6 +105,8 @@ export function BrowserRooms() {
   const [confirming, setConfirming] = useState<string>();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [boardOpen, setBoardOpen] = useState(false);
+  const [railCollapsed, setRailCollapsed] = useState(() => { try { return localStorage.getItem('meshrooms:rail') === 'collapsed'; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem('meshrooms:rail', railCollapsed ? 'collapsed' : 'open'); } catch { /* storage may be unavailable */ } }, [railCollapsed]);
   const [avatarFor, setAvatarFor] = useState<string>();
   const avatarInput = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<Record<string, FileView>>({});
@@ -424,14 +429,16 @@ export function BrowserRooms() {
     </div>;
   }
 
-  return <div className={`browser-rooms ${admitted ? 'browser-joined' : ''}`}>
+  return <div className={`browser-rooms ${admitted ? 'browser-joined' : ''} ${admitted && railCollapsed ? 'browser-rail-collapsed' : ''}`}>
     <a className="skip-link" href="#browser-main">Skip to room</a>
     <aside className="browser-rail">
-      <a className="browser-brand" href="/rooms" aria-label="Meshrooms rooms"><Wordmark demo={false} /></a>
+      <div className="browser-rail-top"><a className="browser-brand" href="/rooms" aria-label="Meshrooms rooms"><Wordmark demo={false} /></a>
+        {admitted && <button className="browser-rail-toggle" aria-controls="browser-room-nav" aria-expanded={!railCollapsed} title={railCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          onClick={() => setRailCollapsed(!railCollapsed)}><RoomIcon kind={railCollapsed ? 'expand' : 'collapse'} /><span className="sr-only">{railCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}</span></button>}</div>
       {admitted ? <>
-        <nav className="browser-room-nav" aria-label="Your rooms"><h2>Your rooms</h2>
-          {[{ id: urlRoom, title }, ...recent.filter(r => r.id !== urlRoom)].map(r => <a key={r.id} href={`/r/${r.id}`} aria-current={r.id === urlRoom ? 'page' : undefined}><RoomIcon kind="chat" /><span>{r.title}</span></a>)}
-          <a href="/rooms" className="browser-all-rooms">Create a room</a>
+        <nav id="browser-room-nav" className="browser-room-nav" aria-label="Your rooms"><h2>Your rooms</h2>
+          {[{ id: urlRoom, title }, ...recent.filter(r => r.id !== urlRoom)].map(r => <a key={r.id} href={`/r/${r.id}`} title={railCollapsed ? r.title : undefined} aria-current={r.id === urlRoom ? 'page' : undefined}><RoomIcon kind="chat" /><span>{r.title}</span></a>)}
+          <a href="/rooms" className="browser-all-rooms" title={railCollapsed ? 'Create a room' : undefined}><RoomIcon kind="plus" /><span>Create a room</span></a>
         </nav>
         <a href="/rooms" className="browser-mobile-rooms">Your rooms</a>
         <div className="browser-self"><MemberAvatar member={self} roomId={urlRoom} fallback={self?.name || ''} /><div><strong>{self?.name}</strong><span>{host ? 'Room host' : 'Room member'}</span></div></div>

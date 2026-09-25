@@ -82,3 +82,20 @@
 .browser-message-highlight{background:#f1f5ff;box-shadow:inset 3px 0 0 var(--blue);margin-left:-14px;padding-left:14px}
 @media(max-width:760px){.browser-message-highlight{margin-left:-10px;padding-left:10px}}
 .task-working{display:inline-flex;align-items:center;gap:5px;margin-left:auto;font-weight:600;color:#7a5510}.task-working::before{content:'';width:6px;height:6px;border-radius:50%;background:#d49423}.task-has-notes+.task-working{margin-left:0}
+/* Collapsible rail (desktop): an icon rail with the room names as tooltips; phones keep their top bar. */
+.browser-rail-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.browser-rail-toggle{display:inline-flex;align-items:center;justify-content:center;width:36px;min-height:36px;padding:0;border-radius:8px;color:var(--rail-secondary);background:none;flex-shrink:0}
+.browser-rail-toggle:hover{background:var(--rail-active);color:#f2f6f9}
+.browser-rooms{transition:grid-template-columns .15s ease}
+@media(prefers-reduced-motion:reduce){.browser-rooms{transition:none}}
+@media(min-width:761px){
+.browser-rail-collapsed{grid-template-columns:64px minmax(0,1fr)}
+.browser-rail-collapsed .browser-rail{padding-inline:10px;align-items:center}
+.browser-rail-collapsed .browser-rail-top{flex-direction:column;gap:16px}
+.browser-rail-collapsed .browser-brand .wordmark{font-size:0;gap:0}
+.browser-rail-collapsed .browser-room-nav h2,.browser-rail-collapsed .browser-rail-footer{display:none}
+.browser-rail-collapsed .browser-room-nav a{justify-content:center;padding:12px 0;width:44px}
+.browser-rail-collapsed .browser-room-nav a span,.browser-rail-collapsed .browser-self>div{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.browser-rail-collapsed .browser-self{padding-inline:0;justify-content:center}
+}
+@media(max-width:760px){.browser-rail-toggle{display:none}.browser-rail-top{display:contents}}
