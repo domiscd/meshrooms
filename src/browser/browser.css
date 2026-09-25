@@ -53,3 +53,8 @@
 .browser-settings .floor-control>span{width:100%;font-size:12px;font-weight:650;color:var(--ink)}
 .browser-settings .floor-control button{font-size:12px;padding:6px 12px;min-height:32px;border:1px solid #b8c3d1;border-radius:8px;background:#fff;color:var(--ink)}
 .browser-settings .floor-control button[aria-pressed=true]{background:#eaf0fd;border-color:var(--blue);color:#234c99;font-weight:650}
+/* Pictures */
+.avatar-picture{object-fit:cover;padding:0;background:var(--line)}
+.browser-picture>div{display:flex;align-items:center;gap:12px;margin-top:12px}
+.browser-picture .browser-remove{padding:0}
+.browser-person .browser-picture-link{display:block;min-height:0;margin-top:4px;font-size:12px}

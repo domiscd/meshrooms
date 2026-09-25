@@ -6,7 +6,7 @@ import type { Participant, RoomSnapshot, TaskDraft } from '../room';
 import { BrowserApi } from './client';
 import { BrowserPeers, type SavedMessage } from './peers';
 import { identity, read, write } from './storage';
-import { DEFAULT_ROOM_SETTINGS, type BrowserMember, type JoinRequest, type RoomSettings, type RoomStatus } from './protocol';
+import { DEFAULT_ROOM_SETTINGS, base64, type BrowserMember, type JoinRequest, type RoomSettings, type RoomStatus } from './protocol';
 import './browser.css';
 
 type RecentRoom = { id: string; title: string };
@@ -29,6 +29,27 @@ const isAgent = (member: BrowserMember | undefined) => member?.role === 'agent';
 /** Room members in the shape the shared mention helpers expect. Members from before agents existed are people. */
 const participantsOf = (members: BrowserMember[] = []): Participant[] =>
   members.map(m => ({ id: m.id, name: m.name, role: m.role ?? 'human', state: 'remote', detail: '', operatorId: m.operatorId }));
+/** A member's picture, or their initial (a rounded square for agents) when they have none. */
+function MemberAvatar({ member, roomId, fallback }: { member?: BrowserMember; roomId: string; fallback: string }) {
+  const agent = member?.role === 'agent';
+  if (member?.avatar) return <img className={`avatar avatar-picture ${agent ? 'agent' : ''}`} src={`/api/lobby/rooms/${roomId}/avatars/${member.id}?h=${member.avatar}`} alt="" />;
+  return <span className={`avatar ${agent ? 'agent' : ''}`} aria-hidden="true">{fallback.slice(0, 1)}</span>;
+}
+/** Crops to a centred square, scales to 128 px and encodes it small enough for the room service (16 KB). */
+async function avatarData(file: File): Promise<string> {
+  if (!file.type.startsWith('image/')) throw new Error('Choose an image file.');
+  const bitmap = await createImageBitmap(file).catch(() => { throw new Error('This image could not be read.'); });
+  const side = Math.min(bitmap.width, bitmap.height), canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 128;
+  canvas.getContext('2d')!.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, 128, 128);
+  bitmap.close();
+  // Browsers without WebP encoding hand back PNG instead, so check the type before trusting the size.
+  for (const [type, quality] of [['image/webp', 0.85], ['image/webp', 0.6], ['image/jpeg', 0.8], ['image/jpeg', 0.6]] as const) {
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, type, quality));
+    if (blob?.type === type && blob.size <= 16 * 1024) return base64(await blob.arrayBuffer());
+  }
+  throw new Error('This picture is too detailed to fit in 16 KB. Try a simpler one.');
+}
 const sameDay = (a: number, b: number) => new Date(a).toDateString() === new Date(b).toDateString();
 const grouped = (a: SavedMessage | undefined, b: SavedMessage) => !!a && a.packet.body.memberId === b.packet.body.memberId && sameDay(a.packet.body.at, b.packet.body.at) && b.packet.body.at - a.packet.body.at < 300_000;
 function dayLabel(at: number) {
@@ -60,6 +81,8 @@ export function BrowserRooms() {
   const [confirming, setConfirming] = useState<string>();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [boardOpen, setBoardOpen] = useState(false);
+  const [avatarFor, setAvatarFor] = useState<string>();
+  const avatarInput = useRef<HTMLInputElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const currentStatus = useRef<RoomStatus | undefined>(undefined);
   const lastRequest = useRef<JoinRequest | undefined>(undefined);
@@ -257,6 +280,18 @@ export function BrowserRooms() {
       setNotice(done);
     });
   }
+  function pickAvatar(memberId: string) { setAvatarFor(memberId); avatarInput.current?.click(); }
+  function uploadAvatar(file: File | undefined) {
+    const target = avatarFor; if (!file || !target) return;
+    void act(async () => {
+      const avatar = await avatarData(file);
+      await api.command('profile', urlRoom, target === status?.memberId ? { avatar } : { avatar, memberId: target });
+      setNotice('Picture updated.');
+    });
+  }
+  function clearAvatar(memberId: string) {
+    void act(async () => { await api.command('profile', urlRoom, memberId === status?.memberId ? { avatar: null } : { avatar: null, memberId }); setNotice('Picture removed.'); });
+  }
   const agentsOf = (member: BrowserMember) => status?.members?.filter(m => isAgent(m) && m.operatorId === member.id).length || 0;
   /** Inline confirmation for removing a person or leaving, naming the agents that go with them. */
   function confirmRemove(member: BrowserMember) {
@@ -278,7 +313,7 @@ export function BrowserRooms() {
           <a href="/rooms" className="browser-all-rooms">Create a room</a>
         </nav>
         <a href="/rooms" className="browser-mobile-rooms">Your rooms</a>
-        <div className="browser-self"><span className="avatar" aria-hidden="true">{self?.name.slice(0, 1)}</span><div><strong>{self?.name}</strong><span>{host ? 'Room host' : 'Room member'}</span></div></div>
+        <div className="browser-self"><MemberAvatar member={self} roomId={urlRoom} fallback={self?.name || ''} /><div><strong>{self?.name}</strong><span>{host ? 'Room host' : 'Room member'}</span></div></div>
       </> : <p className="browser-rail-intro">A shared room for your people and their agents.</p>}
       <p className="browser-rail-footer">Meshrooms by WormDB<br />Browser preview</p>
     </aside>
@@ -337,7 +372,7 @@ export function BrowserRooms() {
                     return <Fragment key={body.id}>
                       {(!index || !sameDay(messages[index - 1].packet.body.at, body.at)) && <div className="browser-day"><span>{dayLabel(body.at)}</span></div>}
                       <article className={`browser-message ${continuation ? 'browser-message-continuation' : ''} ${forYou ? 'browser-message-for-you' : ''} ${isAgent(member) ? 'browser-message-agent' : ''}`}>
-                        <span className={`avatar ${isAgent(member) ? 'agent' : ''}`} aria-hidden="true">{author.slice(0, 1)}</span>
+                        <MemberAvatar member={member} roomId={urlRoom} fallback={author} />
                         <div><header className={continuation ? 'sr-only' : ''}><strong>{author}</strong>{isAgent(member) && <span className="browser-role">agent</span>}{operator && <span className="browser-operator">for {operator}</span>}{body.memberId === status.memberId && <span className="browser-author-you">you</span>}<time dateTime={new Date(body.at).toISOString()}>{new Date(body.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
                           <button className="browser-reply-button" aria-label={`Reply to ${own ? 'your' : `${author}’s`} message`} title="Reply" onClick={() => startReply(body.id)}>Reply</button></header>
                           {body.replyTo && <p className="browser-reply-reference">{target ? <>Replying to <strong>{nameOf(target.memberId)}</strong>: {target.text.length > 120 ? `${target.text.slice(0, 120)}…` : target.text}</> : 'Replying to an earlier message'}</p>}
@@ -368,10 +403,20 @@ export function BrowserRooms() {
                   const devices = status.devices!.filter(d => d.memberId === member.id).length;
                   // The host may remove anyone but themselves; an operator may remove their own agents.
                   const removable = member.id !== status.memberId && (host ? member.id !== status.ownerId : isAgent(member) && member.operatorId === status.memberId);
-                  return <div className="browser-person" key={member.id}><span className={`avatar ${isAgent(member) ? 'agent' : ''}`} aria-hidden="true">{member.name.slice(0, 1)}</span><div><strong>{member.name}{member.id === status.memberId ? ' (you)' : ''}</strong>
+                  const operatesIt = isAgent(member) && member.operatorId === status.memberId;
+                  return <div className="browser-person" key={member.id}><MemberAvatar member={member} roomId={urlRoom} fallback={member.name} /><div><strong>{member.name}{member.id === status.memberId ? ' (you)' : ''}</strong>
                     <span>{isAgent(member) ? `Agent · operated by ${operatorOf(member)}` : `${member.id === status.ownerId ? 'Host · ' : ''}${devices} device${devices === 1 ? '' : 's'}`}</span>
-                    {removable && (confirming === member.id ? confirmRemove(member) : <button className="browser-remove" disabled={busy} aria-label={`Remove ${member.name} from the room`} onClick={() => setConfirming(member.id)}>{isAgent(member) ? 'Remove agent' : 'Remove'}</button>)}</div></div>;
+                    {removable && (confirming === member.id ? confirmRemove(member) : <button className="browser-remove" disabled={busy} aria-label={`Remove ${member.name} from the room`} onClick={() => setConfirming(member.id)}>{isAgent(member) ? 'Remove agent' : 'Remove'}</button>)}
+                    {operatesIt && <button className="browser-text-link browser-picture-link" disabled={busy} onClick={() => pickAvatar(member.id)}>{member.avatar ? 'Change picture' : 'Set picture'}</button>}
+                    {member.avatar && member.id !== status.memberId && (operatesIt || host) && <button className="browser-remove" disabled={busy} onClick={() => clearAvatar(member.id)}>Remove picture</button>}</div></div>;
                 })}
+              </section>
+              <section className="browser-picture" aria-label="Your picture"><h3>Your picture</h3>
+                <input ref={avatarInput} type="file" accept="image/png,image/jpeg,image/webp,image/*" hidden onChange={e => { uploadAvatar(e.target.files?.[0]); e.target.value = ''; }} />
+                <div><MemberAvatar member={self} roomId={urlRoom} fallback={self?.name || ''} />
+                  <button className="secondary" disabled={busy || !self} onClick={() => self && pickAvatar(self.id)}>{self?.avatar ? 'Change picture' : 'Choose picture'}</button>
+                  {self?.avatar && <button className="browser-remove" disabled={busy} onClick={() => clearAvatar(self.id)}>Remove</button>}</div>
+                <p>Cropped to a square and kept under 16 KB. Everyone in this room sees it.</p>
               </section>
               {!isAgent(self) && <section className="browser-agents"><h3>Your agents</h3><p>You’re connecting as <strong>{self?.name}</strong>: you’ll be the operator of any agent you connect here, and only you and the host can remove it. Use your own browser, not one an agent is driving.</p>
                 {agentLink ? <div className="browser-agent-link"><p>Give this link to <strong>{agentLink.name}</strong>. It works once and expires in 15 minutes.</p><label className="sr-only" htmlFor="browser-agent-link">Agent link for {agentLink.name}</label><input id="browser-agent-link" readOnly value={agentLink.url} onFocus={e => e.target.select()} />

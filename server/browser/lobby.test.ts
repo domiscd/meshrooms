@@ -370,3 +370,53 @@ test('the host controls room settings, and can require approval for guests’ ag
     expect(after.members!.map(m => m.name)).toEqual(['Alex', 'Vesper']);
   } finally { lobby.close(); }
 });
+
+/** Just enough of a PNG for type and size detection. */
+function png(width: number, height: number, extra = 16) {
+  const bytes = new Uint8Array(24 + extra);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  new DataView(bytes.buffer).setUint32(16, width); new DataView(bytes.buffer).setUint32(20, height);
+  return Buffer.from(bytes).toString('base64');
+}
+
+test('members set small pictures for themselves and their agents; the host can only clear them', async () => {
+  const lobby = new BrowserLobby(':memory:', { origin });
+  try {
+    const handle = browserHandler(lobby, origin, 'dist');
+    const host = await client(lobby), room = crypto.randomUUID();
+    await host.send('create', room, { title: 'Work', name: 'Alex', label: 'Desktop' });
+    const sam = await admitPerson(lobby, host, room, 'Sam'), agent = await client(lobby);
+    const { token } = await sam.send('agent-invite', room, { name: 'Codex' }) as { token: string };
+    await agent.send('agent-redeem', room, { token, label: 'Node' });
+    const samId = (await sam.status(room)).memberId!, alexId = (await host.status(room)).memberId!, codexId = (await agent.status(room)).memberId!;
+
+    await sam.send('profile', room, { avatar: png(64, 64) });
+    const hash = (await host.status(room)).members!.find(m => m.id === samId)!.avatar!;
+    expect(hash).toMatch(/^[a-f0-9]{16}$/);
+    const picture = await handle(new Request(`${origin}/api/lobby/rooms/${room}/avatars/${samId}?h=${hash}`));
+    expect(picture.status).toBe(200);
+    expect(picture.headers.get('content-type')).toBe('image/png');
+    expect(picture.headers.get('cache-control')).toContain('immutable');
+    expect(picture.headers.get('content-security-policy')).toContain('sandbox');
+    expect((await handle(new Request(`${origin}/api/lobby/rooms/${room}/avatars/${samId}?h=${'0'.repeat(16)}`))).status).toBe(404);
+
+    const gif = Buffer.from('GIF89a\x10\x00\x10\x00' + '\x00'.repeat(20), 'binary').toString('base64');
+    await expect(sam.send('profile', room, { avatar: gif })).rejects.toThrow('PNG, JPEG or WebP');
+    await expect(sam.send('profile', room, { avatar: png(300, 300) })).rejects.toThrow('256 by 256');
+    await expect(sam.send('profile', room, { avatar: png(64, 64, 17 * 1024) })).rejects.toThrow('16 KB');
+    await expect(sam.send('profile', room, { avatar: 'not base64!' })).rejects.toThrow('16 KB');
+
+    await expect(sam.send('profile', room, { avatar: png(32, 32), memberId: alexId })).rejects.toThrow('your own picture');
+    await sam.send('profile', room, { avatar: png(32, 32), memberId: codexId });
+    expect((await host.status(room)).members!.find(m => m.id === codexId)!.avatar).toMatch(/^[a-f0-9]{16}$/);
+    await expect(host.send('profile', room, { avatar: png(32, 32), memberId: samId })).rejects.toThrow('your own picture');
+    await host.send('profile', room, { avatar: null, memberId: samId });
+    expect((await host.status(room)).members!.find(m => m.id === samId)!.avatar).toBeUndefined();
+
+    // A member's picture leaves with them.
+    await sam.send('profile', room, { avatar: png(48, 48) });
+    const again = (await host.status(room)).members!.find(m => m.id === samId)!.avatar!;
+    await host.send('remove', room, { deviceId: (await sam.status(room)).deviceId });
+    expect((await handle(new Request(`${origin}/api/lobby/rooms/${room}/avatars/${samId}?h=${again}`))).status).toBe(404);
+  } finally { lobby.close(); }
+});

@@ -1,4 +1,5 @@
 import { Database } from 'bun:sqlite';
+import { sniff } from '../attachments';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { browserProtocol, deviceId, verify, type BrowserDevice, type BrowserMember, type FormerDevice, type JoinRequest, type RoomSettings, type RoomStatus, type Signal, type SignedCommand, DEFAULT_ROOM_SETTINGS } from '../../src/browser/protocol';
 
@@ -9,6 +10,8 @@ type Room = { id: string; title: string; ownerId: string; members: BrowserMember
 const RETIRED_DEVICES = 256;
 const INVITE_TTL = 900_000, INVITES_PER_PERSON = 4, AGENTS_PER_OPERATOR = 4;
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
+/** Avatars are small pictures kept apart from the room record; members carry only a short hash of theirs. */
+const AVATAR_BYTES = 16 * 1024, AVATAR_SIDE = 256, AVATAR_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 export class LobbyError extends Error { constructor(public status: number, message: string) { super(message); } }
 function fail(status: number, message: string): never { throw new LobbyError(status, message); }
 const uuid = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9-]{36}$/.test(v);
@@ -37,7 +40,7 @@ export class BrowserLobby {
   constructor(path: string, private options: LobbyOptions) {
     this.now = options.now || Date.now;
     this.db = new Database(path, { create: true });
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS receipts (device TEXT, id TEXT, body TEXT, result TEXT, at INTEGER, PRIMARY KEY(device,id));');
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS receipts (device TEXT, id TEXT, body TEXT, result TEXT, at INTEGER, PRIMARY KEY(device,id)); CREATE TABLE IF NOT EXISTS avatars (room TEXT, member TEXT, hash TEXT, type TEXT, bytes BLOB, PRIMARY KEY(room,member));');
   }
   close() { this.db.close(); }
   healthy() { this.db.query('SELECT 1').get(); return true; }
@@ -46,6 +49,10 @@ export class BrowserLobby {
     return row ? JSON.parse(row.body) : fail(404, 'This room is unavailable. Check the invitation.');
   }
   publicRoom(id: string) { const r = this.load(id); return { roomId: r.id, title: r.title }; }
+  /** A member's current avatar, only when the hash matches, so an old link never shows a newer picture. */
+  avatar(roomId: string, memberId: string, hash: string) {
+    return this.db.query('SELECT type, bytes FROM avatars WHERE room=? AND member=? AND hash=?').get(roomId, memberId, hash) as { type: string; bytes: Uint8Array } | null;
+  }
   async execute(input: SignedCommand): Promise<RoomStatus | { roomId: string; token?: string }> {
     const c = input?.command;
     if (!c || c.protocol !== browserProtocol || c.origin !== this.options.origin || !uuid(c.id) || !uuid(c.roomId) || !Number.isSafeInteger(c.at) || Math.abs(this.now() - c.at) > 60_000 || !c.payload || typeof c.payload !== 'object' || Array.isArray(c.payload)) fail(400, 'This request has expired or is invalid. Try again.');
@@ -176,11 +183,36 @@ export class BrowserLobby {
               removed.push(...room.devices.filter(d => d.memberId === agent.id));
               room.devices = room.devices.filter(d => d.memberId !== agent.id);
             }
+            for (const gone of room.members.filter(m => !present(m.id))) this.db.query('DELETE FROM avatars WHERE room=? AND member=?').run(room.id, gone.id);
             room.members = room.members.filter(m => present(m.id));
             room.requests = room.requests.filter(r => !removed.some(d => d.id === r.device.id) && !(r.kind === 'agent' && r.operatorId && !present(r.operatorId)));
             if (room.invites) room.invites = room.invites.filter(i => present(i.operatorId));
             for (const device of removed) { this.presence.delete(`${room.id}:${device.id}`); this.signals.delete(`${room.id}:${device.id}`); }
             room.retired = [...(room.retired || []).filter(d => !removed.some(r => r.id === d.id)), ...removed.map(({ id, publicKey, memberId }) => ({ id, publicKey, memberId }))].slice(-RETIRED_DEVICES);
+            break;
+          }
+          case 'profile': {
+            if (!actor) fail(403, 'Join this room first.');
+            const target = c.payload.memberId === undefined ? actor.memberId : c.payload.memberId;
+            const member = room.members.find(m => m.id === target) || fail(404, 'That person is not in this room.');
+            const own = member.id === actor.memberId, operated = member.role === 'agent' && member.operatorId === actor.memberId;
+            if (c.payload.avatar === null) {
+              // The host may clear anyone's picture; setting one is for yourself or the agents you operate.
+              if (!own && !operated && !isHost) fail(403, 'You can only change your own picture or your agents’.');
+              delete member.avatar; this.db.query('DELETE FROM avatars WHERE room=? AND member=?').run(room.id, member.id);
+              break;
+            }
+            if (!own && !operated) fail(403, 'You can only change your own picture or your agents’.');
+            const encoded = c.payload.avatar;
+            if (typeof encoded !== 'string' || encoded.length > Math.ceil(AVATAR_BYTES / 3) * 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) fail(413, 'Use a picture of at most 16 KB.');
+            const bytes = new Uint8Array(Buffer.from(encoded, 'base64'));
+            if (!bytes.length || bytes.length > AVATAR_BYTES) fail(413, 'Use a picture of at most 16 KB.');
+            const image = sniff(bytes);
+            if (!AVATAR_TYPES.includes(image.type)) fail(415, 'Use a PNG, JPEG or WebP picture.');
+            if (!image.width || !image.height || image.width > AVATAR_SIDE || image.height > AVATAR_SIDE) fail(400, 'Use a picture of at most 256 by 256 pixels.');
+            const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
+            this.db.query('INSERT OR REPLACE INTO avatars VALUES (?,?,?,?,?)').run(room.id, member.id, hash, image.type, bytes);
+            member.avatar = hash;
             break;
           }
           case 'settings': {

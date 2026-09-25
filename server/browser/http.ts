@@ -47,6 +47,15 @@ export function browserHandler(lobby: BrowserLobby, origin: string, distDir: str
         if (!charge(rates, address, 60_000, options.apiLimit || 240)) return json({ error: 'Too many requests. Try again shortly.' }, 429);
         if (url.pathname === '/api/lobby/health' && request.method === 'GET') return json({ ok: lobby.healthy(), revision: options.revision || 'development' });
         if (request.method === 'GET' && /^\/api\/lobby\/rooms\/[a-f0-9-]{36}$/.test(url.pathname)) return json(lobby.publicRoom(url.pathname.split('/').at(-1)!));
+        // Member ids are only shown to admitted members, and the hash pins one picture, so the response can be cached forever.
+        const avatar = /^\/api\/lobby\/rooms\/([a-f0-9-]{36})\/avatars\/([a-f0-9-]{36})$/.exec(url.pathname);
+        if (avatar && request.method === 'GET') {
+          const hash = url.searchParams.get('h') || '';
+          const picture = /^[a-f0-9]{16}$/.test(hash) ? lobby.avatar(avatar[1], avatar[2], hash) : null;
+          if (!picture) return json({ error: 'Not found.' }, 404);
+          return new Response(new Uint8Array(picture.bytes), { headers: { ...headers, 'Content-Type': picture.type, 'Cache-Control': 'private, max-age=31536000, immutable',
+            'Content-Security-Policy': "default-src 'none'; sandbox", 'Cross-Origin-Resource-Policy': 'same-origin' } });
+        }
         if (url.pathname !== '/api/lobby' || request.method !== 'POST') return json({ error: 'Not found.' }, 404);
         if (request.headers.get('origin') !== origin || request.headers.get('content-type')?.split(';')[0] !== 'application/json') return json({ error: 'Use the room application to submit requests.' }, 403);
         // Enforce the streamed limit, not only a client-supplied Content-Length.
