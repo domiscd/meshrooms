@@ -1,10 +1,11 @@
 import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react';
 import { mentionedIds, type Task } from '../collab';
-import { FloorControl, MentionText, TaskBoard, useMentions } from '../prototype/Collaboration';
+import { FloorControl, MAX_MESSAGE_FILES, MAX_UPLOAD_BYTES, MentionText, MessageAttachments, PendingFiles, TaskBoard, formatBytes, uploadName, useMentions, type AttachmentSource, type PendingFile } from '../prototype/Collaboration';
 import { Wordmark } from '../prototype/RoomPrototype';
-import type { Participant, RoomSnapshot, TaskDraft } from '../room';
+import type { Attachment, Participant, RoomSnapshot, TaskDraft } from '../room';
 import { BrowserApi } from './client';
-import { BrowserPeers, type SavedMessage } from './peers';
+import { IMAGE_TYPES, attachmentRef, displayKind, shownText, type AttachmentRef } from './files';
+import { BrowserPeers, type FileView, type SavedMessage } from './peers';
 import { identity, read, write } from './storage';
 import { DEFAULT_ROOM_SETTINGS, base64, type BrowserMember, type JoinRequest, type RoomSettings, type RoomStatus } from './protocol';
 import './browser.css';
@@ -13,7 +14,11 @@ type RecentRoom = { id: string; title: string };
 const deviceLabel = /Mac/.test(navigator.userAgent) ? 'Mac browser' : /Windows/.test(navigator.userAgent) ? 'Windows browser' : 'Browser';
 const urlRoom = location.pathname.match(/^\/r\/([a-f0-9-]{36})$/)?.[1] || '';
 
-function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send' | 'tasks' }) {
+/** A file chosen for the next message: read and hashed here, stored only when the message is sent. */
+type ChosenFile = PendingFile & { ref?: AttachmentRef; bytes?: Uint8Array };
+const fileNames = (body: SavedMessage['packet']['body']) => body.attachments?.map(a => a.name).join(', ') || '';
+
+function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send' | 'tasks' | 'clip' }) {
   const paths = {
     people: <><circle cx="9" cy="8" r="3" /><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M21 21v-3a6 6 0 0 0-3-5" /></>,
     link: <><path d="m10 14 4-4M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M16 8l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" /></>,
@@ -21,6 +26,7 @@ function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send
     chat: <path d="M20 15a3 3 0 0 1-3 3H8l-5 3V6a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3Z" />,
     send: <path d="m4 12 8-8 8 8M12 4v16" />,
     tasks: <path d="M10 6h10M10 12h10M10 18h10M4 6l1.5 1.5L8 5M4 12l1.5 1.5L8 11M4 18l1.5 1.5L8 17" />,
+    clip: <path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L14.5 7" />,
   };
   return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[kind]}</svg>;
 }
@@ -83,6 +89,10 @@ export function BrowserRooms() {
   const [boardOpen, setBoardOpen] = useState(false);
   const [avatarFor, setAvatarFor] = useState<string>();
   const avatarInput = useRef<HTMLInputElement>(null);
+  const [files, setFiles] = useState<Record<string, FileView>>({});
+  const [chosen, setChosen] = useState<ChosenFile[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const currentStatus = useRef<RoomStatus | undefined>(undefined);
   const lastRequest = useRef<JoinRequest | undefined>(undefined);
@@ -141,11 +151,11 @@ export function BrowserRooms() {
             else setUnread(count => count + 1);
             if (!own) {
               const author = currentStatus.current?.members?.find(p => p.id === added.packet.body.memberId)?.name || 'Room member';
-              setLiveMessage({ id: added.packet.body.id, text: `${author}: ${added.packet.body.text}` });
+              setLiveMessage({ id: added.packet.body.id, text: `${author}: ${shownText(added.packet.body) || `shared ${fileNames(added.packet.body)}`}` });
             }
           }
           setMessages(m); setConnected(c);
-        }, message => { if (!disposed) setNetwork(message); }, board => { if (!disposed) setTasks(board); });
+        }, message => { if (!disposed) setNetwork(message); }, board => { if (!disposed) setTasks(board); }, view => { if (!disposed) setFiles(view); });
         peers.current = engine; await engine.load();
         while (!disposed) {
           try {
@@ -230,10 +240,50 @@ export function BrowserRooms() {
     try { await navigator.clipboard.writeText(invite); setNotice('Room link copied.'); }
     catch { setDetailsOpen(true); setNotice('Copy the room link from Room details.'); }
   }
+  const readyFiles = chosen.filter(f => f.status === 'ready');
+  const canSend = !busy && chosen.every(f => f.status === 'ready') && (!!text.trim() || readyFiles.length > 0);
   function send(event: FormEvent) {
-    event.preventDefault(); const draft = text, replyTo = reply ? replyId : undefined;
-    void act(async () => { if (!peers.current) throw new Error('Room connection is not ready.'); await peers.current.send(draft, replyTo); setText(''); setReplyId(undefined); });
+    event.preventDefault(); if (!canSend) return;
+    const draft = text, replyTo = reply ? replyId : undefined, sending = readyFiles;
+    void act(async () => {
+      if (!peers.current) throw new Error('Room connection is not ready.');
+      await peers.current.send(draft, replyTo, sending.map(f => ({ ref: f.ref!, bytes: f.bytes! })));
+      setText(''); setReplyId(undefined);
+      sending.forEach(f => f.preview && URL.revokeObjectURL(f.preview));
+      setChosen(current => current.filter(f => !sending.includes(f)));
+    });
   }
+  /** Files are read and hashed as soon as they are chosen; nothing leaves this browser until the message is sent. */
+  function addFiles(list: FileList | File[] | null | undefined) {
+    const picked = [...(list || [])]; if (!picked.length) return;
+    const accepted = picked.filter(f => f.size > 0 && f.size <= MAX_UPLOAD_BYTES).slice(0, Math.max(0, MAX_MESSAGE_FILES - chosen.length));
+    if (accepted.length < picked.length) setError(`Attach up to ${MAX_MESSAGE_FILES} files of ${formatBytes(MAX_UPLOAD_BYTES)} or less per message.`);
+    const items: ChosenFile[] = accepted.map(file => ({ key: crypto.randomUUID(), file, name: uploadName(file), status: 'uploading',
+      preview: /^image\/(png|jpeg|gif|webp)$/.test(file.type) ? URL.createObjectURL(file) : undefined }));
+    setChosen(current => [...current, ...items]);
+    items.forEach(prepareFile);
+  }
+  function prepareFile(item: ChosenFile) {
+    const patch = (change: Partial<ChosenFile>) => setChosen(current => current.map(f => f.key === item.key ? { ...f, ...change } : f));
+    patch({ status: 'uploading', error: undefined });
+    item.file.arrayBuffer().then(async buffer => { const bytes = new Uint8Array(buffer); patch({ status: 'ready', bytes, ref: await attachmentRef(bytes, item.name) }); })
+      .catch(e => patch({ status: 'failed', error: e instanceof Error ? e.message : 'Could not read this file.' }));
+  }
+  function removeFile(key: string) {
+    setChosen(current => { const item = current.find(f => f.key === key); if (item?.preview) URL.revokeObjectURL(item.preview); return current.filter(f => f.key !== key); });
+  }
+  /** Where a message's file is in this browser: a blob URL once verified and stored, or what is happening to it. */
+  const fileSource: AttachmentSource = attachment => {
+    const sha = (attachment as Attachment & { sha256: string }).sha256, view = files[sha];
+    if (view?.url) return { url: view.url };
+    const transfer = view?.transfer;
+    if (transfer?.state === 'fetching') return { note: `Receiving · ${Math.floor(transfer.received * 100 / transfer.size)}%` };
+    if (transfer?.state === 'damaged') return { note: 'A copy failed verification. Trying other devices.' };
+    if (peers.current?.evicted(sha)) return { note: 'Not kept in this browser: newer files filled this room’s storage' };
+    return { note: connected.length ? 'Waiting for a device that has this file' : 'Available when a device that has it connects' };
+  };
+  const attachmentsOf = (body: SavedMessage['packet']['body']): Attachment[] => (body.attachments || []).map(ref => ({ ...ref,
+    kind: files[ref.sha256]?.url ? displayKind(ref, files[ref.sha256].type) : IMAGE_TYPES.includes(ref.type) ? 'image' : 'file' }));
   function startReply(id: string) { setReplyId(id); requestAnimationFrame(() => composer.current?.focus()); }
   function connectAgent(event: FormEvent) {
     event.preventDefault(); const name = agentName.trim();
@@ -354,7 +404,12 @@ export function BrowserRooms() {
           </section>}
           <p className="sr-only" aria-live="polite" aria-atomic="true">{liveMessage && <span key={liveMessage.id}>{liveMessage.text}</span>}</p>
           <div className="browser-workspace">
-            <div className="browser-conversation">
+            <div className={`browser-conversation ${dragging ? 'dragging' : ''}`}
+              onDragEnter={e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragging(true); } }}
+              onDragOver={e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } }}
+              onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
+              onDrop={e => { if (!e.dataTransfer.files.length) return; e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}>
+              {dragging && <div className="drop-overlay" aria-hidden="true"><RoomIcon kind="clip" /><strong>Drop to attach</strong><span>Screenshots and files up to {formatBytes(MAX_UPLOAD_BYTES)}</span></div>}
               <section ref={transcript} className="browser-transcript" role="log" aria-live="off" aria-label="Conversation" tabIndex={0} onScroll={e => { const el = e.currentTarget; if (el.scrollHeight - el.clientHeight - el.scrollTop < 100) setUnread(0); }}>
                 <div className="browser-message-list">
                   {!messages.length && <div className="browser-empty"><RoomIcon kind="chat" /><h2>{status.members!.length > 1 ? 'Ready for your first message' : status.requests?.length ? 'Your conversation starts here' : 'Bring someone into the room'}</h2><p>{status.members!.length > 1 ? 'Send a message below to start the conversation.' : status.requests?.length ? 'Someone is waiting to join. Admit them above to get started.' : 'Share the room link with someone, or open it on another device.'}</p></div>}
@@ -369,14 +424,16 @@ export function BrowserRooms() {
                     const showReceipt = own && (!next || !grouped(m, next) || m.receipts.length < m.targets.length);
                     const forYou = body.memberId !== status.memberId && (mentionedIds(body.text, participants).includes(status.memberId!) || target?.memberId === status.memberId);
                     const operator = operatorOf(member);
+                    const shown = shownText(body), quoted = target && (shownText(target) || fileNames(target));
                     return <Fragment key={body.id}>
                       {(!index || !sameDay(messages[index - 1].packet.body.at, body.at)) && <div className="browser-day"><span>{dayLabel(body.at)}</span></div>}
                       <article className={`browser-message ${continuation ? 'browser-message-continuation' : ''} ${forYou ? 'browser-message-for-you' : ''} ${isAgent(member) ? 'browser-message-agent' : ''}`}>
                         <MemberAvatar member={member} roomId={urlRoom} fallback={author} />
                         <div><header className={continuation ? 'sr-only' : ''}><strong>{author}</strong>{isAgent(member) && <span className="browser-role">agent</span>}{operator && <span className="browser-operator">for {operator}</span>}{body.memberId === status.memberId && <span className="browser-author-you">you</span>}<time dateTime={new Date(body.at).toISOString()}>{new Date(body.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
                           <button className="browser-reply-button" aria-label={`Reply to ${own ? 'your' : `${author}’s`} message`} title="Reply" onClick={() => startReply(body.id)}>Reply</button></header>
-                          {body.replyTo && <p className="browser-reply-reference">{target ? <>Replying to <strong>{nameOf(target.memberId)}</strong>: {target.text.length > 120 ? `${target.text.slice(0, 120)}…` : target.text}</> : 'Replying to an earlier message'}</p>}
-                          <div className="message-text"><MentionText text={body.text} participants={participants} viewerId={status.memberId} /></div>
+                          {body.replyTo && <p className="browser-reply-reference">{target ? <>Replying to <strong>{nameOf(target.memberId)}</strong>: {quoted!.length > 120 ? `${quoted!.slice(0, 120)}…` : quoted}</> : 'Replying to an earlier message'}</p>}
+                          {shown && <div className="message-text"><MentionText text={shown} participants={participants} viewerId={status.memberId} /></div>}
+                          {body.attachments && <MessageAttachments roomId={urlRoom} attachments={attachmentsOf(body)} author={own ? 'You' : author} source={fileSource} />}
                           {showReceipt && <span className="browser-receipt">{m.targets.length ? `Stored on ${m.receipts.length} of ${m.targets.length} devices` : 'Saved in this browser'}</span>}
                         </div>
                       </article>
@@ -390,8 +447,13 @@ export function BrowserRooms() {
                 {reply && <div className="browser-reply-draft"><span>Replying to <strong>{reply.packet.body.memberId === status.memberId ? 'your message' : nameOf(reply.packet.body.memberId)}</strong></span><button className="browser-close" aria-label="Cancel reply" onClick={() => setReplyId(undefined)}><RoomIcon kind="close" /></button></div>}
                 <form className="browser-composer" onSubmit={send}><label className="sr-only" htmlFor="browser-message">Message {title}</label><textarea ref={composer} id="browser-message" value={text} {...mentions.inputProps}
                   onChange={e => { setText(e.target.value); mentions.track(e.target.value, e.target.selectionStart); }} onSelect={e => mentions.track(e.currentTarget.value, e.currentTarget.selectionStart)} onBlur={mentions.close}
-                  onKeyDown={e => { if (mentions.onKeyDown(e)) return; if (e.key === 'Escape' && reply) { setReplyId(undefined); return; } if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (text.trim() && !busy) send(e); } }}
-                  maxLength={4000} rows={2} placeholder={agents.length ? `Message ${title} · type @ to ask an agent` : `Message ${title}`} /><div><span className="browser-key-hint">Enter to send · Shift + Enter for a new line</span><button className="primary" disabled={busy || !text.trim()}><span>Send</span><RoomIcon kind="send" /></button></div></form>
+                  onPaste={e => { const pasted = [...e.clipboardData.files]; if (pasted.length) { e.preventDefault(); addFiles(pasted); } }}
+                  onKeyDown={e => { if (mentions.onKeyDown(e)) return; if (e.key === 'Escape' && reply) { setReplyId(undefined); return; } if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(e); } }}
+                  maxLength={4000} rows={2} placeholder={agents.length ? `Message ${title} · type @ to ask an agent` : `Message ${title}`} />
+                  <PendingFiles files={chosen} onRemove={removeFile} onRetry={key => { const item = chosen.find(f => f.key === key); if (item) prepareFile(item); }} />
+                  <div><span className="browser-compose-tools"><input ref={fileInput} type="file" multiple hidden onChange={e => { addFiles(e.target.files); e.target.value = ''; }} />
+                    <button type="button" className="secondary browser-attach" title="Attach screenshots or files (you can also paste or drop them)" onClick={() => fileInput.current?.click()}><RoomIcon kind="clip" /><span>Attach</span></button>
+                    <span className="browser-key-hint">Enter to send · Shift + Enter for a new line</span></span><button className="primary" disabled={!canSend}><span>Send</span><RoomIcon kind="send" /></button></div></form>
                 <p className="browser-connection" role="status"><span className={`browser-connection-dot ${connected.length ? 'is-connected' : ''}`} aria-hidden="true" />{connected.length ? `Connected to ${connected.length} other device${connected.length === 1 ? '' : 's'}` : status.devices!.length > 1 ? 'Waiting for another device to connect' : 'You’re the first one here'}</p>
               </div>
             </div>
@@ -445,7 +507,7 @@ export function BrowserRooms() {
                 </details>
                 {!host && self && (confirming === self.id ? confirmRemove(self) : <button className="browser-remove browser-leave" disabled={busy} onClick={() => setConfirming(self.id)}>Leave this room</button>)}
               </section>
-              <p className="browser-storage-note">Messages stay in participating browsers. Device receipts confirm storage, not that someone has read a message.</p>
+              <p className="browser-storage-note">Messages and files stay in participating browsers; each keeps the newest 256 MB of files per room. Device receipts confirm storage, not that someone has read a message.</p>
             </aside>
           </div>
         </>}

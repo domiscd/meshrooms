@@ -58,3 +58,7 @@
 .browser-picture>div{display:flex;align-items:center;gap:12px;margin-top:12px}
 .browser-picture .browser-remove{padding:0}
 .browser-person .browser-picture-link{display:block;min-height:0;margin-top:4px;font-size:12px}
+/* Attachments: files move between devices, so they can be on their way or no longer kept here. */
+.browser-composer .pending-files{padding:8px 0 0}.browser-compose-tools{display:flex;align-items:center;gap:12px;margin-right:auto}.browser-composer .browser-attach{min-width:0;display:inline-flex;align-items:center;gap:6px;padding-inline:12px}
+.browser-message .message-attachments{margin-top:6px}.attachment-waiting{cursor:default}.attachment-image.attachment-waiting{display:flex;align-items:center;justify-content:center;min-height:96px;max-height:340px;padding:16px;border-style:dashed;text-align:center}
+.attachment-waiting span{display:flex;flex-direction:column;gap:4px;min-width:0}.attachment-image.attachment-waiting strong{font-size:12px;overflow-wrap:anywhere}.attachment-waiting small{font-size:11px;color:var(--muted)}span.attachment-file.attachment-waiting{border-style:dashed}span.attachment-file.attachment-waiting:hover{background:none}

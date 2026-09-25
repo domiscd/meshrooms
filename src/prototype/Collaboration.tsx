@@ -212,28 +212,38 @@ export function PendingFiles({ files, onRemove, onRetry }: { files: PendingFile[
   </li>)}</ul>;
 }
 
+/** Where an attachment's bytes are: a URL, or a note while they are not on this device yet (browser rooms fetch them from peers). */
+export type AttachmentSource = (attachment: Attachment) => { url?: string; note?: string };
+
 /** Images render inline and open full size; other files are downloads. */
-export function MessageAttachments({ roomId, attachments, author }: { roomId: string; attachments: Attachment[]; author: string }) {
+export function MessageAttachments({ roomId, attachments, author, source }: { roomId: string; attachments: Attachment[]; author: string; source?: AttachmentSource }) {
   const [open, setOpen] = useState<Attachment | null>(null);
+  const locate: AttachmentSource = source || (a => ({ url: attachmentUrl(roomId, a.id) }));
   const images = attachments.filter(a => a.kind === 'image'); const files = attachments.filter(a => a.kind !== 'image');
+  const viewing = open && locate(open).url;
   return <div className="message-attachments">
-    {images.length > 0 && <div className={`attachment-images count-${Math.min(images.length, 4)}`}>{images.map(image =>
-      <button key={image.id} className="attachment-image" onClick={() => setOpen(image)} aria-label={`Open ${image.name} from ${author}`}>
-        <img src={attachmentUrl(roomId, image.id)} alt={image.name} width={image.width} height={image.height} loading="lazy" decoding="async" />
-      </button>)}</div>}
-    {files.map(file => <a key={file.id} className="attachment-file" href={attachmentUrl(roomId, file.id)} download={file.name}>
-      <FileIcon /><span><strong>{file.name}</strong><small>{file.type === 'application/pdf' ? 'PDF' : file.type === 'text/plain' ? 'Text' : 'File'} · {formatBytes(file.size)}</small></span>
-    </a>)}
-    {open && <ImageViewer roomId={roomId} image={open} author={author} onClose={() => setOpen(null)} />}
+    {images.length > 0 && <div className={`attachment-images count-${Math.min(images.length, 4)}`}>{images.map(image => {
+      const { url, note } = locate(image);
+      return url ? <button key={image.id} className="attachment-image" onClick={() => setOpen(image)} aria-label={`Open ${image.name} from ${author}`}>
+        <img src={url} alt={image.name} width={image.width} height={image.height} loading="lazy" decoding="async" />
+      </button> : <div key={image.id} className="attachment-image attachment-waiting" role="img" aria-label={`${image.name}: ${note}`} style={image.width && image.height ? { aspectRatio: `${image.width} / ${image.height}` } : undefined}>
+        <span><strong>{image.name}</strong><small>{note}</small></span></div>;
+    })}</div>}
+    {files.map(file => {
+      const { url, note } = locate(file);
+      const label = <><FileIcon /><span><strong>{file.name}</strong><small>{note || `${file.type === 'application/pdf' ? 'PDF' : file.type === 'text/plain' ? 'Text' : 'File'} · ${formatBytes(file.size)}`}</small></span></>;
+      return url ? <a key={file.id} className="attachment-file" href={url} download={file.name}>{label}</a> : <span key={file.id} className="attachment-file attachment-waiting">{label}</span>;
+    })}
+    {open && viewing && <ImageViewer url={viewing} image={open} author={author} onClose={() => setOpen(null)} />}
   </div>;
 }
 
-function ImageViewer({ roomId, image, author, onClose }: { roomId: string; image: Attachment; author: string; onClose: () => void }) {
+function ImageViewer({ url, image, author, onClose }: { url: string; image: Attachment; author: string; onClose: () => void }) {
   return <dialog className="image-viewer" aria-label={image.name} ref={element => { if (element && !element.open) element.showModal(); }}
     onClose={onClose} onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="viewer-bar"><span><strong>{image.name}</strong><small>{author} · {image.width && image.height ? `${image.width}×${image.height} · ` : ''}{formatBytes(image.size)}</small></span>
-      <a className="secondary" href={attachmentUrl(roomId, image.id)} download={image.name}>Download</a>
+      <a className="secondary" href={url} download={image.name}>Download</a>
       <button className="icon-button" aria-label="Close image" onClick={onClose} autoFocus><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg></button></div>
-    <img src={attachmentUrl(roomId, image.id)} alt={image.name} />
+    <img src={url} alt={image.name} />
   </dialog>;
 }
