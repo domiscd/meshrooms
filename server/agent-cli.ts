@@ -10,7 +10,7 @@
  * Needs only Bun. State (device key, messages) stays in ~/.meshrooms/agents unless
  * MESHROOMS_AGENT_HOME is set. The connect token is used once and never stored.
  */
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
@@ -56,8 +56,21 @@ function startRunner(roomId: string) {
   writeFileSync(join(home(), 'browser-agents', roomId, 'runner.pid'), String(child.pid), { mode: 0o600 });
   return child.pid;
 }
+/** The saved runner, only if that PID still is our bridge for this room (PIDs get reused). */
 function runnerAlive(roomId: string) {
-  try { const pid = Number(readFileSync(join(home(), 'browser-agents', roomId, 'runner.pid'), 'utf8')); process.kill(pid, 0); return pid; } catch { return undefined; }
+  try {
+    const pid = Number(readFileSync(join(home(), 'browser-agents', roomId, 'runner.pid'), 'utf8'));
+    if (!Number.isSafeInteger(pid) || pid <= 1) return undefined;
+    process.kill(pid, 0);
+    const command = process.platform === 'win32'
+      ? execFileSync('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`], { encoding: 'utf8', windowsHide: true })
+      : execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+    // Exactly: <bun> <meshrooms-agent.js|agent-cli.ts> run --room <roomId>. A shell or editor mentioning these words does not match.
+    const token = (name: string) => `(?:"[^"]*${name}"|[^\\s"]*${name})`;
+    // The program must be bun itself; after that, the script path may contain spaces (macOS/Linux ps shows it unquoted).
+    const expected = new RegExp(`^${token('bun(?:\\.exe)?')}\\s+(?:"[^"]*(?:meshrooms-agent\\.js|agent-cli\\.ts)"|.*(?:meshrooms-agent\\.js|agent-cli\\.ts))\\s+run\\s+--room\\s+${roomId}\\s*$`, 'i');
+    return expected.test(command.trim()) ? pid : undefined;
+  } catch { return undefined; }
 }
 
 export async function agentCli(argv: string[]): Promise<unknown> {
