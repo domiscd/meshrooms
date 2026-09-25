@@ -1,7 +1,8 @@
 # Screenshots and file attachments
 
 Status: implemented in the local daemon, including paired (two-node) rooms over
-MeshGuard application transfers. Browser rooms do not carry attachments yet.
+MeshGuard application transfers. Browser rooms carry attachments peer to peer;
+see [browser-attachments.md](browser-attachments.md).
 
 ## Why
 
@@ -77,5 +78,4 @@ per room, so that room's later messages wait behind it; other rooms keep flowing
 
 ## Not yet
 
-- Browser rooms.
 - Image annotation, video, and per-attachment deletion.
