@@ -1,0 +1,91 @@
+import { expect, test } from 'bun:test';
+import { castVote, decisionChunks, decisionWakes, due, foldDecisions, nextVoteRevision, openDecision, reviseDecision, tallyVotes, validDecisionBody, validVoteBody,
+  type DecisionBody, type RoomMembers, type VoteBody } from '../../src/browser/decisions';
+
+const roomId = crypto.randomUUID(), deviceId = 'a'.repeat(64);
+const [igor, dom, sam, vesper, gemini] = Array.from({ length: 5 }, () => crypto.randomUUID());
+const room: RoomMembers = { ownerId: igor, members: [{ id: igor, role: 'human' }, { id: dom, role: 'human' }, { id: sam }, { id: vesper, role: 'agent', operatorId: igor }, { id: gemini, role: 'agent', operatorId: dom }] };
+const as = (memberId: string) => ({ roomId, deviceId, memberId });
+const fold = (ops: (DecisionBody | VoteBody)[]) => foldDecisions(ops, room);
+
+test('agents open decisions; only people’s votes count, and agents’ advice is kept apart', () => {
+  const open = openDecision({ ...as(vesper), question: 'Which storage for history?', options: ['WormDB', 'IndexedDB only'], askAgents: true });
+  expect(validDecisionBody(open, roomId)).toBe(true);
+  let d = fold([open])[0];
+  const ops: (DecisionBody | VoteBody)[] = [open, castVote(as(igor), d, 'o1', 'replication'), castVote(as(gemini), d, 'o2', 'simpler'), castVote(as(vesper), d, 'o2')];
+  d = fold(ops)[0];
+  expect(d.tally).toMatchObject({ result: 'decided', optionIds: ['o1'], tally: { o1: 1, o2: 0 }, voters: 1, people: 3 });
+  expect(d.votes.filter(v => !v.counts).map(v => v.memberId).sort()).toEqual([gemini, vesper].sort());
+  expect(d.settled).toBe(false);
+});
+
+test('a majority settles early, a split room is a draw, and the latest vote per person counts', () => {
+  const open = openDecision({ ...as(dom), question: 'Ship today?', options: ['Yes', 'No'] });
+  let d = fold([open])[0];
+  const ops: (DecisionBody | VoteBody)[] = [open, castVote(as(igor), d, 'o1'), castVote(as(dom), d, 'o1')];
+  expect(fold(ops)[0]).toMatchObject({ settled: true, tally: { result: 'decided', optionIds: ['o1'] } }); // 2 of 3 people: sam can't change it
+  const split = [open, castVote(as(igor), d, 'o1'), castVote(as(dom), d, 'o2'), castVote(as(sam), d, 'o1')];
+  const changed = [...split, castVote(as(sam), d, 'o2', '', nextVoteRevision(split.map(o => o), d.id, sam))];
+  expect(fold(changed)[0].tally).toMatchObject({ result: 'decided', optionIds: ['o2'], tally: { o1: 1, o2: 2 } });
+  const withdrawn = [...split, castVote(as(sam), d, null, '', 2)];
+  expect(fold(withdrawn)[0]).toMatchObject({ settled: false, tally: { result: 'draw', optionIds: ['o1', 'o2'] } });
+  expect(tallyVotes(d.options, [], 3).tally.result).toBe('no-votes');
+});
+
+test('closing records the tally; only the creator, its operator, or the host may close or change the terms', () => {
+  const open = openDecision({ ...as(vesper), question: 'Plan OK?', mode: 'plan-review', context: '1. do x\n2. do y' });
+  expect(open.options.map(o => o.id)).toEqual(['approve', 'changes', 'reject']);
+  let d = fold([open])[0];
+  const vote = castVote(as(igor), d, 'approve', 'go');
+  d = fold([open, vote])[0];
+  expect(() => reviseDecision(as(dom), d, { addOption: 'Maybe' })).not.toThrow(); // building is fine; the fold rejects it for plan reviews
+  const byDom = reviseDecision(as(dom), d, { close: true }), byOperator = reviseDecision(as(igor), d, { close: true });
+  expect(fold([open, vote, byDom])[0].state).toBe('open');
+  const closed = fold([open, vote, byOperator])[0];
+  expect(closed).toMatchObject({ state: 'closed', outcome: { result: 'decided', optionIds: ['approve'], voters: 1, people: 3 } });
+  // Later votes and revisions never change a closed outcome.
+  const late = castVote(as(dom), d, 'reject');
+  expect(fold([open, vote, byOperator, late, reviseDecision(as(vesper), closed, {})])[0].outcome).toEqual(closed.outcome);
+});
+
+test('anyone adds options while open; concurrent revisions settle by operation id, not clocks', () => {
+  const open = openDecision({ ...as(igor), question: 'Name?', options: ['A', 'B'] });
+  const d = fold([open])[0];
+  const x = { ...reviseDecision(as(sam), d, { addOption: 'C' }), id: '00000000-0000-4000-8000-000000000002', at: 1 };
+  const y = { ...reviseDecision(as(dom), d, { addOption: 'D' }), id: '00000000-0000-4000-8000-000000000001', at: 9_999_999_999_999 };
+  expect(fold([open, x, y])[0].options.map(o => o.label)).toEqual(['A', 'B', 'D']);
+  expect(fold([y, open, x])[0].options.map(o => o.label)).toEqual(['A', 'B', 'D']);
+  // Options only grow: a revision that renames an option is ignored.
+  const rename = { ...reviseDecision(as(igor), d, {}), options: [{ ...d.options[0], label: 'Z' }, d.options[1]] };
+  expect(fold([open, rename])[0].options[0].label).toBe('A');
+});
+
+test('deadlines make a decision due; agents wake when asked and when their own decision resolves', () => {
+  const asked = openDecision({ ...as(igor), question: 'Thoughts?', options: ['A', 'B'], askAgents: [vesper] });
+  const mine = openDecision({ ...as(vesper), question: 'Proceed?', options: ['Yes', 'No'], closesAt: 1000 });
+  const ops: (DecisionBody | VoteBody)[] = [asked, mine];
+  expect(due(fold(ops).find(d => d.id === mine.decisionId)!, 1000)).toBe(true);
+  expect(decisionWakes(ops, room, vesper, 0).asked.map(d => d.id)).toEqual([asked.decisionId]);
+  expect(decisionWakes(ops, room, gemini, 0).asked).toEqual([]);
+  const advice = castVote(as(vesper), fold(ops)[0], 'o2', 'B is simpler');
+  const closed = reviseDecision(as(vesper), fold(ops).find(d => d.id === mine.decisionId)!, { close: true });
+  const later = [...ops, advice, closed];
+  const wakes = decisionWakes(later, room, vesper, ops.length);
+  expect(wakes.asked).toEqual([]);
+  expect(wakes.resolved.map(d => [d.id, d.outcome?.result])).toEqual([[mine.decisionId, 'no-votes']]);
+  expect(decisionWakes(later, room, vesper, later.length).resolved).toEqual([]);
+});
+
+test('validation rejects malformed operations, and sync chunks stay small', () => {
+  const open = openDecision({ ...as(igor), question: 'Q', options: ['A', 'B'] });
+  expect(() => openDecision({ ...as(igor), question: 'Q', options: ['only one'] })).toThrow();
+  expect(validDecisionBody({ ...open, options: [...open.options, open.options[0]] }, roomId)).toBe(false);
+  expect(validDecisionBody({ ...open, state: 'closed' }, roomId)).toBe(false);
+  expect(validDecisionBody({ ...open, question: 'x'.repeat(201) }, roomId)).toBe(false);
+  expect(validVoteBody({ ...castVote(as(igor), fold([open])[0], 'o1'), comment: 'x'.repeat(501) }, roomId)).toBe(false);
+  const packets = Array.from({ length: 60 }, () => ({ body: openDecision({ ...as(igor), question: 'Q'.repeat(200), context: 'c'.repeat(1000), options: ['A', 'B'] }), signature: 's' }));
+  const chunks = decisionChunks(roomId, packets);
+  expect(chunks.length).toBeGreaterThan(1);
+  expect(chunks.every(c => JSON.stringify(c).length < 20_000)).toBe(true);
+  expect(chunks.flatMap(c => c.ops).length).toBe(60);
+});
