@@ -1,9 +1,11 @@
-# Native Windows build
+# Native WormDB build
 
 Meshrooms uses the MIT-licensed [WormDB source](https://github.com/igorls/wormdb)
 and pins its native build inputs in this repository. The current source pin
 combines the synchronous embedding API and priority security fixes. Published
 older app archives retain their own native pins; a source merge is not a release.
+
+## Windows x64
 
 With a clean checkout at the lockfile's `candidateCommit` and its initialized
 `deps/meshguard` submodule, run:
@@ -41,3 +43,29 @@ WormDB binary license in [LICENSES](../LICENSES).
 The exact locked DLL must pass Meshrooms' native integration and process-recovery
 tests. A new compiler, native commit, or binary hash needs a new reviewed lockfile
 and qualification; never change the expected hash just to make a build pass.
+
+## Linux x64
+
+The same source pins build a shared library for Linux. WormDB's default Linux
+crypto backend links libsodium; Meshrooms passes `-Dcrypto-backend=std` so the
+Linux candidate matches the Windows pin and needs no separately shipped crypto
+library.
+
+```sh
+./scripts/build-native.sh --source <wormdb-checkout> --out <fresh-output-directory>
+./scripts/build-native.sh --verify-only --out <qualified-output-directory>
+```
+
+Requires Linux x86_64 and Zig 0.16.0. The script takes both source commits, the
+Zig version and the required symbols from
+[native/linux-x64.lock.json](../native/linux-x64.lock.json) only, checks them,
+exports tracked files into a fresh ignored scratch directory, builds only the
+FFI library, refuses an existing `libwormdb_ffi.so`, and writes
+`wormdb.linux-x64.provenance.json` next to the candidate. Point
+`WORMDB_LIBRARY_PATH` at that `.so` for adapter and daemon tests.
+
+`--verify-only` checks the exact reviewed hash in
+[native/linux-x64.lock.json](../native/linux-x64.lock.json). That pin records the
+qualified Ubuntu x86_64 artifact; it does not replace the Windows pin in
+`wormdb.lock.json`. A new compiler, source commit, or binary hash needs a new
+reviewed Linux lockfile entry after the persistence suite passes.
