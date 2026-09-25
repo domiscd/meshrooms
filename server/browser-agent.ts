@@ -16,17 +16,23 @@ import { join, resolve } from 'node:path';
 import { RTCPeerConnection, type RTCDataChannel } from 'werift';
 import { browserProtocol, type BrowserDevice, type Command, type RoomStatus } from '../src/browser/protocol';
 import { COMPACT_AT, compactBoard, foldBoard, MAX_TASK_OPS, syncChunks, taskBody, validTaskBody, type BoardSync, type TaskChange, type TaskPacket } from '../src/browser/board';
+import {
+  COMPACT_REACTIONS_AT, MAX_REACTION_OPS, compactReactions, foldReactions, isReactionEmoji, memberReacted,
+  reactionSyncChunks, validReactionBody, type ReactionBody, type ReactionEmoji, type ReactionPacket,
+} from '../src/browser/reactions';
 import { evaluateWake, mayAgentSpeak, mentionedIds, type Floor, type Task } from '../src/collab';
 import type { Message, Participant } from '../src/room';
 
 type Identity = { id: string; publicKey: string; privateJwk: JsonWebKey };
 type MessageBody = { kind: 'message'; roomId: string; id: string; deviceId: string; memberId: string; text: string; at: number; replyTo?: string };
 type ReceiptBody = { kind: 'receipt'; roomId: string; id: string; deviceId: string };
-type Packet = { body: MessageBody | ReceiptBody; signature: string };
+type Packet = { body: MessageBody | ReceiptBody | ReactionBody; signature: string };
 type Stored = { packet: { body: MessageBody; signature: string }; targets: string[]; receipts: string[] };
 type Members = { memberId?: string; members: { id: string; name: string; role?: 'human' | 'agent'; operatorId?: string }[]; devices: { id: string; memberId: string }[] };
 /** A queued task change; `run` applies it to the board as it stands when signing, so the revision is current. */
 type TaskIntent = { type: 'task'; id: string; taskId: string; change: TaskChange; removed?: boolean };
+/** A queued reaction toggle; `run` signs it against the current folded chips. */
+type ReactionIntent = { type: 'reaction'; id: string; messageId: string; emoji: ReactionEmoji };
 /** A stored task operation and the board cursor at which it arrived. */
 type StoredOp = TaskPacket & { seq: number };
 type Peer = { pc: RTCPeerConnection; session: string; channel?: RTCDataChannel; started: number };
@@ -110,6 +116,8 @@ export class BrowserAgent {
   taskOps(): StoredOp[] { return readJson<StoredOp[]>(this.path('tasks.json'), []).map((p, i) => ({ ...p, seq: p.seq ?? i + 1 })); }
   /** Arrivals so far. Compaction drops operations but never moves the cursor back, so later assignments still wake. */
   boardCursor(ops = this.taskOps()) { return Math.max(readJson(this.path('board.json'), { seq: 0 }).seq, ops.at(-1)?.seq ?? 0); }
+  reactionOps(): ReactionPacket[] { return readJson(this.path('reactions.json'), []); }
+  reactionChips() { return foldReactions(this.reactionOps().map(p => p.body)); }
 
   /** The room as local-room shapes, so collab.ts rules apply unchanged. */
   view() {
@@ -171,6 +179,24 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
     }
     if (added.length) storeOps(ops, added);
   };
+  const storeReactions = (ops: ReactionPacket[], added: ReactionPacket[]) => {
+    let next = [...ops, ...added];
+    if (next.length > COMPACT_REACTIONS_AT) next = compactReactions(next);
+    if (next.length > MAX_REACTION_OPS) next = next.slice(-MAX_REACTION_OPS);
+    writeJson(join(agent.dir, 'reactions.json'), next);
+  };
+  const acceptReactions = async (packets: unknown[]) => {
+    const ops = agent.reactionOps(); const known = new Set(ops.map(p => p.body.id)); const added: ReactionPacket[] = [];
+    for (const packet of packets as ReactionPacket[]) {
+      const b = packet?.body;
+      if (ops.length + added.length >= MAX_REACTION_OPS) break;
+      if (!validReactionBody(b, agent.roomId) || known.has(b.id) || typeof packet.signature !== 'string') continue;
+      const author = status?.devices?.find(d => d.id === b.deviceId) ?? status?.formerDevices?.find(d => d.id === b.deviceId);
+      if (!author || author.memberId !== b.memberId || !await agent.verify(author.publicKey, b, packet.signature)) continue;
+      known.add(b.id); added.push({ body: b, signature: packet.signature });
+    }
+    if (added.length) storeReactions(ops, added);
+  };
 
   const flush = () => {
     const messages = agent.messages();
@@ -184,17 +210,20 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
     channel.stateChanged.subscribe(state => {
       if (state !== 'open') return;
       log(`channel open to ${id.slice(0, 8)}`);
-      // Exchange boards so either side catches up on tasks changed while apart.
+      // Exchange boards and reactions so either side catches up while apart.
       for (const chunk of syncChunks(agent.roomId, agent.taskOps().map(({ body, signature }) => ({ body, signature })))) channel.send(JSON.stringify(chunk));
+      for (const chunk of reactionSyncChunks(agent.roomId, agent.reactionOps())) channel.send(JSON.stringify(chunk));
       flush();
     });
     channel.onMessage.subscribe(raw => void transaction(async () => {
       const text = raw.toString(); if (text.length > 20_000 || peers.get(id) !== peer) return;
       const device = status?.devices?.find(d => d.id === id); if (!device) return;
       let packet: Packet; try { packet = JSON.parse(text); } catch { return; }
-      const sync = packet as unknown as BoardSync;
+      const sync = packet as unknown as BoardSync & { kind?: string; ops?: unknown };
       if (sync?.kind === 'board') { if (sync.roomId === agent.roomId && Array.isArray(sync.ops)) await acceptOps(sync.ops); return; }
-      if ((packet?.body as { kind?: string })?.kind === 'task') { await acceptOps([packet]); return; }
+      if (sync?.kind === 'reactions') { if (sync.roomId === agent.roomId && Array.isArray(sync.ops)) await acceptReactions(sync.ops); return; }
+      if ((packet?.body as { kind?: string })?.kind === 'task') { await acceptOps([packet as never]); return; }
+      if ((packet?.body as { kind?: string })?.kind === 'reaction') { await acceptReactions([packet as never]); return; }
       const b = packet?.body;
       if (!b || b.roomId !== agent.roomId || b.deviceId !== id || typeof b.id !== 'string' || !/^[a-f0-9-]{36}$/.test(b.id)
         || typeof packet.signature !== 'string' || !await agent.verify(device.publicKey, b, packet.signature)) return;
@@ -231,7 +260,7 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
   const deliverOutbox = () => transaction(async () => {
     const outbox = join(agent.dir, 'outbox');
     for (const file of readdirSync(outbox).filter(f => f.endsWith('.json')).sort()) {
-      const item = readJson<{ id: string; text: string; replyTo?: string } | TaskIntent | null>(join(outbox, file), null);
+      const item = readJson<{ id: string; text: string; replyTo?: string } | TaskIntent | ReactionIntent | null>(join(outbox, file), null);
       if (!item || !status?.memberId) continue;
       if ('type' in item && item.type === 'task') {
         const ops = agent.taskOps();
@@ -242,6 +271,22 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
             const body = { ...taskBody({ roomId: agent.roomId, deviceId: identity.id, memberId: status.memberId, current, taskId: item.taskId, change: item.change, removed: item.removed }), id: item.id };
             const packet = { body, signature: await agent.sign(body) };
             storeOps(ops, [packet]);
+            for (const peer of peers.values()) if (peer.channel?.readyState === 'open') peer.channel.send(JSON.stringify(packet));
+          }
+        }
+        unlinkSync(join(outbox, file)); continue;
+      }
+      if ('type' in item && item.type === 'reaction') {
+        const ops = agent.reactionOps();
+        if (!ops.some(p => p.body.id === item.id)) {
+          if (agent.messages().some(m => m.packet.body.id === item.messageId)) {
+            const remove = memberReacted(agent.reactionChips(), item.messageId, item.emoji, status.memberId);
+            const body: ReactionBody = {
+              kind: 'reaction', roomId: agent.roomId, id: item.id, deviceId: identity.id, memberId: status.memberId,
+              messageId: item.messageId, emoji: item.emoji, at: Date.now(), ...(remove ? { removed: true as const } : {}),
+            };
+            const packet = { body, signature: await agent.sign(body) };
+            storeReactions(ops, [packet]);
             for (const peer of peers.values()) if (peer.channel?.readyState === 'open') peer.channel.send(JSON.stringify(packet));
           }
         }
@@ -355,4 +400,26 @@ export async function taskBrowser(agent: BrowserAgent, input: { requestId: strin
     await Bun.sleep(300);
   }
   return { taskId, status: 'queued-for-bridge' };
+}
+
+/** Queue a reaction toggle for `run` to sign and share. Humans and agents use the same fixed emoji set. */
+export async function reactBrowser(agent: BrowserAgent, input: { requestId: string; messageId: string; emoji: string }) {
+  const view = agent.view(); if (!view.memberId) throw new Error('This agent is not admitted to the browser room yet.');
+  if (!isReactionEmoji(input.emoji)) throw new Error(`Use one of these emoji: ${['👍', '❤️', '😂', '👀', '🎉'].join(' ')}`);
+  if (!view.messages.some(m => m.id === input.messageId)) throw new Error('That message is not in this browser room.');
+  const emoji = input.emoji;
+  const already = memberReacted(agent.reactionChips(), input.messageId, emoji, view.memberId);
+  if (!agent.reactionOps().some(p => p.body.id === input.requestId)) {
+    writeJson(join(agent.dir, 'outbox', `${Date.now()}-${input.requestId}.json`), { type: 'reaction', id: input.requestId, messageId: input.messageId, emoji } satisfies ReactionIntent);
+  }
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const pending = readdirSync(join(agent.dir, 'outbox')).some(f => f.endsWith(`-${input.requestId}.json`));
+    if (agent.reactionOps().some(p => p.body.id === input.requestId)) {
+      return { messageId: input.messageId, emoji, removed: already, status: 'shared', reactions: agent.reactionChips().filter(c => c.messageId === input.messageId) };
+    }
+    if (!pending) return { messageId: input.messageId, emoji, status: 'dropped', reason: 'The message was gone before this reaction was signed.' };
+    await Bun.sleep(300);
+  }
+  return { messageId: input.messageId, emoji, status: 'queued-for-bridge' };
 }

@@ -1,5 +1,9 @@
 import type { Task } from '../collab';
 import { COMPACT_AT, MAX_TASK_OPS, compactBoard, foldBoard, syncChunks, taskBody, validTaskBody, type TaskChange, type TaskPacket } from './board';
+import {
+  COMPACT_REACTIONS_AT, MAX_REACTION_OPS, compactReactions, foldReactions, isReactionEmoji, memberReacted,
+  reactionSyncChunks, validReactionBody, type ReactionChip, type ReactionEmoji, type ReactionPacket,
+} from './reactions';
 import { verify, type BrowserDevice, type RoomStatus } from './protocol';
 import { BrowserApi } from './client';
 import { read, sign, write } from './storage';
@@ -8,7 +12,7 @@ import { read, sign, write } from './storage';
 type MessageBody = { kind: 'message'; roomId: string; id: string; deviceId: string; memberId: string; text: string; at: number; replyTo?: string };
 const isId = (value: unknown) => typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
 type ReceiptBody = { kind: 'receipt'; roomId: string; id: string; deviceId: string };
-type Packet = { body: MessageBody | ReceiptBody | TaskPacket['body']; signature: string };
+type Packet = { body: MessageBody | ReceiptBody | TaskPacket['body'] | ReactionPacket['body']; signature: string };
 export type SavedMessage = { packet: Packet & { body: MessageBody }; targets: string[]; receipts: string[] };
 type Peer = { pc: RTCPeerConnection; session: string; channel?: RTCDataChannel; started: number };
 
@@ -22,18 +26,26 @@ export class BrowserPeers {
   private pendingIncoming = 0;
   private key: string;
   private boardKey: string;
+  private reactionKey: string;
   private ops: TaskPacket[] = [];
+  private reactionOps: ReactionPacket[] = [];
   constructor(private api: BrowserApi, private roomId: string, private deviceId: string, private session: string,
     private changed: (messages: SavedMessage[], connected: string[], added?: SavedMessage) => void, private error: (message: string) => void,
-    private boardChanged: (tasks: Task[]) => void = () => {}) {
+    private boardChanged: (tasks: Task[]) => void = () => {},
+    private reactionsChanged: (chips: ReactionChip[]) => void = () => {}) {
     this.key = `messages:${deviceId}:${roomId}`;
     this.boardKey = `board:${deviceId}:${roomId}`;
+    this.reactionKey = `reactions:${deviceId}:${roomId}`;
   }
   async load() {
-    this.messages = await read<SavedMessage[]>(this.key) || []; this.ops = await read<TaskPacket[]>(this.boardKey) || [];
-    this.notify(); this.notifyBoard();
+    this.messages = await read<SavedMessage[]>(this.key) || [];
+    this.ops = await read<TaskPacket[]>(this.boardKey) || [];
+    this.reactionOps = await read<ReactionPacket[]>(this.reactionKey) || [];
+    this.notify(); this.notifyBoard(); this.notifyReactions();
   }
   private notifyBoard() { if (!this.stopped) this.boardChanged(foldBoard(this.ops.map(op => op.body))); }
+  private notifyReactions() { if (!this.stopped) this.reactionsChanged(foldReactions(this.reactionOps.map(op => op.body))); }
+  chips() { return foldReactions(this.reactionOps.map(op => op.body)); }
   /** Keeps operations we have not seen, compacting once the board grows large. */
   private async addOps(incoming: TaskPacket[]) {
     const fresh = incoming.filter(op => !this.ops.some(known => known.body.id === op.body.id));
@@ -53,6 +65,47 @@ export class BrowserPeers {
       await this.addOps([packet]);
       for (const peer of this.peers.values()) if (peer.channel?.readyState === 'open') { try { peer.channel.send(JSON.stringify(packet)); } catch { /* The board is exchanged again on reconnect. */ } }
     });
+  }
+  private async addReactionOps(incoming: ReactionPacket[]) {
+    const fresh = incoming.filter(op => !this.reactionOps.some(known => known.body.id === op.body.id));
+    if (!fresh.length) return;
+    let next = [...this.reactionOps, ...fresh];
+    if (next.length > COMPACT_REACTIONS_AT) next = compactReactions(next);
+    if (next.length > MAX_REACTION_OPS) throw new Error('This room’s reactions log is full in this preview.');
+    await write(this.reactionKey, next); this.reactionOps = next; this.notifyReactions();
+  }
+  /** Toggle one of the fixed emoji on a message. Humans and agents use the same path. */
+  async react(messageId: string, emoji: ReactionEmoji) {
+    return this.transaction(async () => {
+      if (!this.status?.memberId || this.stopped) throw new Error('Join the room before reacting.');
+      if (!isReactionEmoji(emoji)) throw new Error('Choose one of the room’s reaction emoji.');
+      if (!this.messages.some(m => m.packet.body.id === messageId)) throw new Error('That message is not in this browser.');
+      const remove = memberReacted(this.chips(), messageId, emoji, this.status.memberId);
+      const body = {
+        kind: 'reaction' as const, roomId: this.roomId, id: crypto.randomUUID(), deviceId: this.deviceId,
+        memberId: this.status.memberId, messageId, emoji, at: Date.now(), ...(remove ? { removed: true as const } : {}),
+      };
+      const packet: ReactionPacket = { body, signature: await sign(body) };
+      await this.addReactionOps([packet]);
+      for (const peer of this.peers.values()) if (peer.channel?.readyState === 'open') {
+        try { peer.channel.send(JSON.stringify(packet)); } catch { /* Reactions are exchanged again on reconnect. */ }
+      }
+    });
+  }
+  private async acceptReactions(sync: { roomId?: unknown; ops?: unknown }) {
+    if (sync.roomId !== this.roomId || !Array.isArray(sync.ops) || sync.ops.length > 500) return;
+    const accepted: ReactionPacket[] = [];
+    for (const op of sync.ops as ReactionPacket[]) {
+      const author = this.status?.devices?.find(d => d.id === op?.body?.deviceId) ?? this.status?.formerDevices?.find(d => d.id === op?.body?.deviceId);
+      if (!author || !validReactionBody(op.body, this.roomId) || op.body.memberId !== author.memberId || typeof op.signature !== 'string') continue;
+      if (await verify(author.publicKey, op.body, op.signature)) accepted.push({ body: op.body, signature: op.signature });
+    }
+    await this.addReactionOps(accepted);
+  }
+  private sendReactions(channel: RTCDataChannel) {
+    for (const chunk of reactionSyncChunks(this.roomId, this.reactionOps)) {
+      try { channel.send(JSON.stringify(chunk)); } catch { return; }
+    }
   }
   /** Operations relayed in a board exchange are checked against each author's own device, not the sender's. */
   private async acceptBoard(sync: { roomId?: unknown; ops?: unknown }) {
@@ -104,7 +157,7 @@ export class BrowserPeers {
   }
   private connectChannel(peer: Peer, id: string, channel: RTCDataChannel) {
     peer.channel = channel;
-    channel.onopen = () => { this.flush(); this.sendBoard(channel); this.notify(); };
+    channel.onopen = () => { this.flush(); this.sendBoard(channel); this.sendReactions(channel); this.notify(); };
     channel.onclose = () => this.notify();
     channel.onmessage = event => {
       if (typeof event.data !== 'string' || event.data.length > 20_000 || this.pendingIncoming >= 64) return;
@@ -115,6 +168,7 @@ export class BrowserPeers {
         let packet: Packet;
         try { packet = JSON.parse(event.data); } catch { return; }
         if ((packet as unknown as { kind?: unknown })?.kind === 'board') { await this.acceptBoard(packet as never); return; }
+        if ((packet as unknown as { kind?: unknown })?.kind === 'reactions') { await this.acceptReactions(packet as never); return; }
         const b = packet?.body;
         if (!b || b.roomId !== this.roomId || b.deviceId !== id || !isId(b.id) || typeof packet.signature !== 'string' || !await verify(device.publicKey, b, packet.signature)) return;
         if (b.kind === 'message') {
@@ -135,6 +189,8 @@ export class BrowserPeers {
           if (m?.targets.includes(id) && !m.receipts.includes(id)) await this.save(this.messages.map(x => x === m ? { ...x, receipts: [...x.receipts, id] } : x));
         } else if (b.kind === 'task') {
           if (validTaskBody(b, this.roomId) && b.memberId === device.memberId) await this.addOps([{ body: b, signature: packet.signature }]);
+        } else if (b.kind === 'reaction') {
+          if (validReactionBody(b, this.roomId) && b.memberId === device.memberId) await this.addReactionOps([{ body: b, signature: packet.signature }]);
         }
       }).catch(e => this.error(e.message)).finally(() => { this.pendingIncoming--; });
     };

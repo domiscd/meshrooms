@@ -5,6 +5,7 @@ import { Wordmark } from '../prototype/RoomPrototype';
 import type { Participant, RoomSnapshot, TaskDraft } from '../room';
 import { BrowserApi } from './client';
 import { BrowserPeers, type SavedMessage } from './peers';
+import { REACTION_EMOJI, memberReacted, type ReactionChip, type ReactionEmoji } from './reactions';
 import { identity, read, write } from './storage';
 import { DEFAULT_ROOM_SETTINGS, base64, type BrowserMember, type JoinRequest, type RoomSettings, type RoomStatus } from './protocol';
 import './browser.css';
@@ -81,6 +82,8 @@ export function BrowserRooms() {
   const [confirming, setConfirming] = useState<string>();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [boardOpen, setBoardOpen] = useState(false);
+  const [reactions, setReactions] = useState<ReactionChip[]>([]);
+  const [reactPicker, setReactPicker] = useState<string>();
   const [avatarFor, setAvatarFor] = useState<string>();
   const avatarInput = useRef<HTMLInputElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -145,7 +148,7 @@ export function BrowserRooms() {
             }
           }
           setMessages(m); setConnected(c);
-        }, message => { if (!disposed) setNetwork(message); }, board => { if (!disposed) setTasks(board); });
+        }, message => { if (!disposed) setNetwork(message); }, board => { if (!disposed) setTasks(board); }, chips => { if (!disposed) setReactions(chips); });
         peers.current = engine; await engine.load();
         while (!disposed) {
           try {
@@ -377,6 +380,33 @@ export function BrowserRooms() {
                           <button className="browser-reply-button" aria-label={`Reply to ${own ? 'your' : `${author}’s`} message`} title="Reply" onClick={() => startReply(body.id)}>Reply</button></header>
                           {body.replyTo && <p className="browser-reply-reference">{target ? <>Replying to <strong>{nameOf(target.memberId)}</strong>: {target.text.length > 120 ? `${target.text.slice(0, 120)}…` : target.text}</> : 'Replying to an earlier message'}</p>}
                           <div className="message-text"><MentionText text={body.text} participants={participants} viewerId={status.memberId} /></div>
+                          {(() => {
+                            const chips = reactions.filter(r => r.messageId === body.id);
+                            const open = reactPicker === body.id;
+                            return <div className="browser-reactions">
+                              {chips.map(chip => {
+                                const mine = memberReacted([chip], body.id, chip.emoji, status.memberId!);
+                                const names = chip.memberIds.map(id => id === status.memberId ? 'you' : nameOf(id)).join(', ');
+                                return <button key={chip.emoji} type="button" className={`browser-reaction ${mine ? 'is-mine' : ''}`} disabled={busy || !admitted}
+                                  title={names} aria-label={`${chip.emoji} ${chip.memberIds.length}${mine ? ', including you' : ''}. Activate to ${mine ? 'remove' : 'add'} your reaction.`}
+                                  onClick={() => void act(async () => { if (!peers.current) throw new Error('Room connection is not ready.'); await peers.current.react(body.id, chip.emoji); })}>
+                                  <span aria-hidden="true">{chip.emoji}</span><span>{chip.memberIds.length}</span>
+                                </button>;
+                              })}
+                              {admitted && <div className="browser-reaction-add">
+                                <button type="button" className="browser-reaction-picker-toggle" disabled={busy} aria-expanded={open} aria-label={`Add a reaction to ${own ? 'your' : `${author}’s`} message`}
+                                  onClick={() => setReactPicker(open ? undefined : body.id)}>+</button>
+                                {open && <div className="browser-reaction-picker" role="listbox" aria-label="Reaction emoji">
+                                  {REACTION_EMOJI.map(emoji => <button key={emoji} type="button" role="option" disabled={busy}
+                                    aria-label={emoji} onClick={() => void act(async () => {
+                                      if (!peers.current) throw new Error('Room connection is not ready.');
+                                      await peers.current.react(body.id, emoji as ReactionEmoji);
+                                      setReactPicker(undefined);
+                                    })}>{emoji}</button>)}
+                                </div>}
+                              </div>}
+                            </div>;
+                          })()}
                           {showReceipt && <span className="browser-receipt">{m.targets.length ? `Stored on ${m.receipts.length} of ${m.targets.length} devices` : 'Saved in this browser'}</span>}
                         </div>
                       </article>
