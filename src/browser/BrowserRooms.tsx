@@ -309,12 +309,19 @@ export function BrowserRooms() {
   function send(event: FormEvent) {
     event.preventDefault(); if (!canSend) return;
     const draft = text, replyTo = reply ? replyId : undefined, sending = readyFiles;
+    // Clear at once, so whatever is typed while this sends is a new draft; a failed send puts its text back in front.
+    setText(''); setReplyId(undefined); setChosen(current => current.filter(f => !sending.includes(f)));
     void act(async () => {
-      if (!peers.current) throw new Error('Room connection is not ready.');
-      await peers.current.send(draft, replyTo, sending.map(f => ({ ref: f.ref!, bytes: f.bytes! })));
-      setText(''); setReplyId(undefined);
+      try {
+        if (!peers.current) throw new Error('Room connection is not ready.');
+        await peers.current.send(draft, replyTo, sending.map(f => ({ ref: f.ref!, bytes: f.bytes! })));
+      } catch (e) {
+        setText(current => !draft ? current : current.trim() ? `${draft}\n${current}` : draft);
+        setReplyId(current => current ?? replyTo);
+        setChosen(current => [...sending, ...current].slice(0, MAX_MESSAGE_FILES));
+        throw e;
+      }
       sending.forEach(f => f.preview && URL.revokeObjectURL(f.preview));
-      setChosen(current => current.filter(f => !sending.includes(f)));
     });
   }
   /** Files are read and hashed as soon as they are chosen; nothing leaves this browser until the message is sent. */
