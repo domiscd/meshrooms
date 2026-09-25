@@ -315,3 +315,18 @@ test('a member leaves by removing their own device, and their agents leave with 
     await expect(host.send('remove', room, { deviceId: (await host.status(room)).deviceId })).rejects.toThrow('at least one host device');
   } finally { lobby.close(); }
 });
+
+test('keys of devices that left stay available to members, so their task changes still verify', async () => {
+  const lobby = new BrowserLobby(':memory:', { origin });
+  try {
+    const host = await client(lobby), room = crypto.randomUUID();
+    await host.send('create', room, { title: 'Work', name: 'Alex', label: 'Desktop' });
+    const sam = await admitPerson(lobby, host, room, 'Sam');
+    const samStatus = await sam.status(room);
+    expect((await host.status(room)).formerDevices).toBeUndefined();
+    await sam.send('remove', room, { deviceId: samStatus.deviceId });
+    const after = await host.status(room);
+    expect(after.formerDevices).toEqual([{ id: samStatus.deviceId, publicKey: samStatus.devices!.find(d => d.id === samStatus.deviceId)!.publicKey, memberId: samStatus.memberId! }]);
+    expect((await sam.status(room)).formerDevices).toBeUndefined(); // not shown outside the room
+  } finally { lobby.close(); }
+});

@@ -21,7 +21,10 @@ export type RoomStatus = {
   deviceId: string; request?: JoinRequest; requests?: JoinRequest[];
   members?: BrowserMember[]; devices?: (BrowserDevice & { session?: string })[];
   signals?: Signal[]; iceServers?: RTCIceServer[]; agentInvites?: AgentInvite[];
+  /** Keys of devices that have left, so their earlier signed task changes still verify for people who join later. */
+  formerDevices?: FormerDevice[];
 };
+export type FormerDevice = { id: string; publicKey: string; memberId: string };
 export const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 export function base64(bytes: ArrayBuffer) { return btoa(String.fromCharCode(...new Uint8Array(bytes))); }
 export function unbase64(value: string) { return Uint8Array.from(atob(value), c => c.charCodeAt(0)); }

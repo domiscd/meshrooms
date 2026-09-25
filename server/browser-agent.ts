@@ -142,7 +142,8 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
       const b = packet?.body;
       if (ops.length + added.length >= MAX_TASK_OPS) break;
       if (!validTaskBody(b, agent.roomId) || known.has(b.id) || typeof packet.signature !== 'string') continue;
-      const author = status?.devices?.find(d => d.id === b.deviceId);
+      // A change by someone who has since left still verifies against the key the room service keeps for them.
+      const author = status?.devices?.find(d => d.id === b.deviceId) ?? status?.formerDevices?.find(d => d.id === b.deviceId);
       if (!author || author.memberId !== b.memberId || !await agent.verify(author.publicKey, b, packet.signature)) continue;
       known.add(b.id); added.push({ body: b, signature: packet.signature });
     }

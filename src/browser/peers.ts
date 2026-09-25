@@ -1,5 +1,5 @@
 import type { Task } from '../collab';
-import { MAX_TASK_OPS, foldBoard, syncChunks, taskBody, validTaskBody, type TaskChange, type TaskPacket } from './board';
+import { MAX_TASK_OPS, compactBoard, foldBoard, syncChunks, taskBody, validTaskBody, type TaskChange, type TaskPacket } from './board';
 import { verify, type BrowserDevice, type RoomStatus } from './protocol';
 import { BrowserApi } from './client';
 import { read, sign, write } from './storage';
@@ -11,6 +11,8 @@ type ReceiptBody = { kind: 'receipt'; roomId: string; id: string; deviceId: stri
 type Packet = { body: MessageBody | ReceiptBody | TaskPacket['body']; signature: string };
 export type SavedMessage = { packet: Packet & { body: MessageBody }; targets: string[]; receipts: string[] };
 type Peer = { pc: RTCPeerConnection; session: string; channel?: RTCDataChannel; started: number };
+
+const COMPACT_AT = 1000;
 
 /** Real browser data channels; the lobby carries connection descriptions only. */
 export class BrowserPeers {
@@ -34,12 +36,14 @@ export class BrowserPeers {
     this.notify(); this.notifyBoard();
   }
   private notifyBoard() { if (!this.stopped) this.boardChanged(foldBoard(this.ops.map(op => op.body))); }
-  /** Keeps operations we have not seen; the board never trims, so every device folds the same history. */
+  /** Keeps operations we have not seen, compacting once the board grows large. */
   private async addOps(incoming: TaskPacket[]) {
     const fresh = incoming.filter(op => !this.ops.some(known => known.body.id === op.body.id));
     if (!fresh.length) return;
-    if (this.ops.length + fresh.length > MAX_TASK_OPS) throw new Error('This room’s task board is full in this preview.');
-    const next = [...this.ops, ...fresh];
+    let next = [...this.ops, ...fresh];
+    // Compaction keeps the same board with fewer operations; only a large board needs it.
+    if (next.length > COMPACT_AT) next = compactBoard(next);
+    if (next.length > MAX_TASK_OPS) throw new Error('This room’s task board is full in this preview.');
     await write(this.boardKey, next); this.ops = next; this.notifyBoard();
   }
   /** Create a task (no current), change one, or remove it. Signed here and sent to every connected device. */
@@ -57,7 +61,8 @@ export class BrowserPeers {
     if (sync.roomId !== this.roomId || !Array.isArray(sync.ops) || sync.ops.length > 500) return;
     const accepted: TaskPacket[] = [];
     for (const op of sync.ops as TaskPacket[]) {
-      const author = this.status?.devices?.find(d => d.id === op?.body?.deviceId);
+      // A change by someone who has since left still verifies against the key the room service keeps for them.
+      const author = this.status?.devices?.find(d => d.id === op?.body?.deviceId) ?? this.status?.formerDevices?.find(d => d.id === op?.body?.deviceId);
       if (!author || !validTaskBody(op.body, this.roomId) || op.body.memberId !== author.memberId || typeof op.signature !== 'string') continue;
       if (await verify(author.publicKey, op.body, op.signature)) accepted.push({ body: op.body, signature: op.signature });
     }

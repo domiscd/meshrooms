@@ -27,24 +27,65 @@ export function validTaskBody(b: any, roomId: string): b is TaskBody {
     && TASK_STATUSES.includes(b.status) && (b.assigneeId === null || id(b.assigneeId)) && (b.removed === undefined || b.removed === true);
 }
 
-/** Operations of one task in the order every device applies them: revision, then time, then operation id. */
-function compare(a: TaskBody, b: TaskBody) { return a.revision - b.revision || a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); }
+/**
+ * Operations of one task in the order every device applies them: revision, then operation id. Device clocks never
+ * decide a conflict, so a skewed clock cannot win; `at` is shown to people only.
+ */
+function compare(a: TaskBody, b: TaskBody) { return a.revision - b.revision || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); }
 
-/** The current board: the last operation of each task wins; removed tasks disappear. Oldest tasks first. */
-export function foldBoard(ops: TaskBody[]): Task[] {
+/**
+ * The operations that decide a task, in order: at each revision only its winner counts, so a losing concurrent edit
+ * cannot change who is credited with the assignment.
+ */
+function chain(list: TaskBody[]) {
+  const sorted = [...list].sort(compare);
+  return sorted.filter((op, i) => sorted[i + 1]?.revision !== op.revision);
+}
+/** Where the current assignee was set: the chain position after the last operation with a different assignee. */
+function assignmentIndex(steps: TaskBody[]) {
+  const final = steps.at(-1)!.assigneeId;
+  let index = steps.length - 1;
+  while (index > 0 && steps[index - 1].assigneeId === final) index--;
+  return index;
+}
+function group(ops: TaskBody[]) {
   const byTask = new Map<string, TaskBody[]>();
   for (const op of ops) byTask.set(op.taskId, [...(byTask.get(op.taskId) || []), op]);
+  return byTask;
+}
+
+/**
+ * The current board. The last operation of each task wins, but a removal always wins: once anyone removes a task,
+ * a concurrent or later edit made without seeing the removal does not bring it back. Oldest tasks first.
+ */
+export function foldBoard(ops: TaskBody[]): Task[] {
   const tasks: (Task & { createdAt: number })[] = [];
-  for (const [taskId, list] of byTask) {
-    list.sort(compare);
-    let assignee: string | null = null, assignedBy: string | undefined, assignedRevision: number | undefined;
-    for (const op of list) if (op.assigneeId !== assignee) { assignee = op.assigneeId; assignedBy = op.assigneeId ? op.memberId : undefined; assignedRevision = op.assigneeId ? op.revision : undefined; }
-    const last = list.at(-1)!;
-    if (last.removed) continue;
-    tasks.push({ id: taskId, title: last.title, notes: last.notes, status: last.status, ...(last.assigneeId ? { assigneeId: last.assigneeId, assignedBy, assignedRevision } : {}),
-      createdBy: list[0].memberId, updatedBy: last.memberId, updatedAt: new Date(last.at).toISOString(), revision: last.revision, createdAt: list[0].at });
+  for (const [taskId, list] of group(ops)) {
+    if (list.some(op => op.removed)) continue;
+    const steps = chain(list), last = steps.at(-1)!, assigned = steps[assignmentIndex(steps)];
+    tasks.push({ id: taskId, title: last.title, notes: last.notes, status: last.status,
+      ...(last.assigneeId ? { assigneeId: last.assigneeId, assignedBy: assigned.memberId, assignedRevision: assigned.revision } : {}),
+      createdBy: steps[0].memberId, updatedBy: last.memberId, updatedAt: new Date(last.at).toISOString(), revision: last.revision, createdAt: steps[0].at });
   }
   return tasks.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1)).map(({ createdAt: _, ...task }) => task);
+}
+
+/**
+ * Drops operations no longer needed to fold the same board, so a busy room stays under MAX_TASK_OPS. Per task it keeps
+ * the first and last chain steps and the steps around the assignment; a removed task keeps one removal. Operations are
+ * only dropped, never rewritten, so every signature still verifies and task content converges whatever each device
+ * compacted. One known gap: a losing concurrent edit that first arrives after its revision's winner was compacted away
+ * can shift who is credited with the assignment on that device. Callers compact only when the board grows large.
+ */
+export function compactBoard<T extends { body: TaskBody }>(packets: T[]): T[] {
+  const keep = new Set<string>();
+  for (const list of group(packets.map(p => p.body)).values()) {
+    const removal = [...list].sort(compare).find(op => op.removed);
+    if (removal) { keep.add(removal.id); continue; }
+    const steps = chain(list), at = assignmentIndex(steps);
+    for (const index of [0, at - 1, at, steps.length - 1]) if (index >= 0) keep.add(steps[index].id);
+  }
+  return packets.filter(p => keep.has(p.body.id));
 }
 
 /** The unsigned body for creating (no current task) or changing a task; the caller signs and sends it. */

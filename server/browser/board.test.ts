@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { foldBoard, syncChunks, taskBody, validTaskBody, type TaskBody } from '../../src/browser/board';
+import { compactBoard, foldBoard, syncChunks, taskBody, validTaskBody, type TaskBody } from '../../src/browser/board';
 
 const roomId = crypto.randomUUID(), alex = crypto.randomUUID(), sam = crypto.randomUUID(), codex = crypto.randomUUID();
 const device = 'a'.repeat(64);
@@ -42,4 +42,41 @@ test('operations are validated, and board exchange stays under the data channel 
   expect(chunks.length).toBeGreaterThan(1);
   expect(chunks.flatMap(c => c.ops)).toHaveLength(40);
   for (const chunk of chunks) expect(JSON.stringify(chunk).length).toBeLessThan(20_000);
+});
+
+test("Gemini's review: removal wins, clocks never decide, and a losing edit does not take assignment credit", () => {
+  const create = op(alex, { title: 'Review', assigneeId: codex }, undefined, { at: 1000 });
+  const [task] = foldBoard([create]);
+  // 2. A removal wins over a simultaneous edit, and over a later edit made without seeing the removal.
+  const removal = { ...taskBody({ roomId, deviceId: device, memberId: sam, current: task, change: {}, removed: true }), at: 1500, id: '00000000-0000-4000-8000-000000000001' };
+  const edit = op(alex, { notes: 'later' }, task, { at: 9000, id: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+  expect(foldBoard([create, removal, edit])).toEqual([]);
+  expect(foldBoard([create, edit, op(alex, { status: 'done' }, foldBoard([create, edit])[0]), removal])).toEqual([]);
+  // 3. At the same revision the operation id decides, not the clock: a device far in the future still loses.
+  const future = op(sam, { title: 'Future clock' }, task, { at: 9_999_999_999_999, id: '00000000-0000-4000-8000-00000000000a' });
+  const now = op(alex, { title: 'Normal clock' }, task, { at: 2000, id: '00000000-0000-4000-8000-00000000000b' });
+  expect(foldBoard([create, future, now])[0].title).toBe('Normal clock');
+  // 5. A losing concurrent reassignment does not move the credit away from whoever assigned the current assignee.
+  const reassign = op(sam, { assigneeId: sam }, task, { id: '00000000-0000-4000-8000-000000000001' });
+  const retitle = op(alex, { title: 'Review v2' }, task, { id: '00000000-0000-4000-8000-000000000002' });
+  expect(foldBoard([create, reassign, retitle])[0]).toMatchObject({ title: 'Review v2', assigneeId: codex, assignedBy: alex, assignedRevision: 1 });
+});
+
+test('compaction keeps the same board with far fewer operations', () => {
+  let ops: TaskBody[] = [];
+  const apply = (memberId: string, change: Parameters<typeof taskBody>[0]['change'], taskId?: string, removed = false) => {
+    const current = taskId ? foldBoard(ops).find(t => t.id === taskId) : undefined;
+    const body = taskBody({ roomId, deviceId: device, memberId, current, taskId, change, removed });
+    ops.push(body); return body.taskId;
+  };
+  const a = apply(alex, { title: 'A', assigneeId: codex }), b = apply(sam, { title: 'B' }), c = apply(sam, { title: 'C' });
+  for (let i = 0; i < 40; i++) apply(i % 2 ? alex : sam, { status: (['todo', 'doing', 'done'] as const)[i % 3], notes: `step ${i}` }, a);
+  apply(sam, { assigneeId: sam }, b); apply(alex, { assigneeId: null }, b); apply(alex, { assigneeId: sam }, b); apply(sam, { status: 'doing' }, b);
+  apply(alex, {}, c, true);
+  const packets = ops.map(body => ({ body, signature: 's' }));
+  const compacted = compactBoard(packets);
+  expect(compacted.length).toBeLessThan(12);
+  expect(foldBoard(compacted.map(p => p.body))).toEqual(foldBoard(ops));
+  expect(foldBoard(ops).find(t => t.id === b)).toMatchObject({ assigneeId: sam, assignedBy: alex });
+  expect(compactBoard(compacted)).toEqual(compacted);
 });

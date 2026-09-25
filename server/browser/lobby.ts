@@ -1,10 +1,12 @@
 import { Database } from 'bun:sqlite';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { browserProtocol, deviceId, verify, type BrowserDevice, type BrowserMember, type JoinRequest, type RoomStatus, type Signal, type SignedCommand } from '../../src/browser/protocol';
+import { browserProtocol, deviceId, verify, type BrowserDevice, type BrowserMember, type FormerDevice, type JoinRequest, type RoomStatus, type Signal, type SignedCommand } from '../../src/browser/protocol';
 
 /** Only a hash of an agent link's token is kept; the link itself is shown once to the person who made it. */
 type StoredInvite = { tokenHash: string; operatorId: string; name: string; expiresAt: number };
-type Room = { id: string; title: string; ownerId: string; members: BrowserMember[]; devices: BrowserDevice[]; requests: JoinRequest[]; invites?: StoredInvite[] };
+/** `retired` keeps the public keys of devices that left, so their earlier signed task changes still verify. */
+type Room = { id: string; title: string; ownerId: string; members: BrowserMember[]; devices: BrowserDevice[]; requests: JoinRequest[]; invites?: StoredInvite[]; retired?: FormerDevice[] };
+const RETIRED_DEVICES = 256;
 const INVITE_TTL = 900_000, INVITES_PER_PERSON = 4, AGENTS_PER_OPERATOR = 4;
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 export class LobbyError extends Error { constructor(public status: number, message: string) { super(message); } }
@@ -166,6 +168,7 @@ export class BrowserLobby {
             room.requests = room.requests.filter(r => !removed.some(d => d.id === r.device.id));
             if (room.invites) room.invites = room.invites.filter(i => present(i.operatorId));
             for (const device of removed) { this.presence.delete(`${room.id}:${device.id}`); this.signals.delete(`${room.id}:${device.id}`); }
+            room.retired = [...(room.retired || []).filter(d => !removed.some(r => r.id === d.id)), ...removed.map(({ id, publicKey, memberId }) => ({ id, publicKey, memberId }))].slice(-RETIRED_DEVICES);
             break;
           }
           case 'signal': {
@@ -216,6 +219,7 @@ export class BrowserLobby {
     result.members = room.members.filter(m => room.devices.some(d => d.memberId === m.id));
     result.devices = room.devices.map(d => ({ ...d, session: online(d) }));
     if (actor.memberId === room.ownerId) result.requests = room.requests.filter(r => r.state === 'pending' && r.expiresAt > this.now()).map(r => { const { code, ...rest } = r; return rest; });
+    if (room.retired?.length) result.formerDevices = room.retired;
     const invites = (room.invites || []).filter(i => i.operatorId === actor.memberId && i.expiresAt > this.now());
     if (invites.length) result.agentInvites = invites.map(({ name, expiresAt }) => ({ name, expiresAt }));
     const key = `${room.id}:${id}`;
