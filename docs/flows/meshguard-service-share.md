@@ -52,7 +52,7 @@ peer can reach the shared port on this node's mesh IP.
 | One port | At most one active share per node (first slice). |
 | One peer | Allow only the room's paired MeshGuard peer key. |
 | No broader allow | Before writing a share rule, `share` checks that no existing global/org/default-allow (or other peer allow) already admits this TCP port to anyone besides the paired peer. If a broader allow would still let an unpaired peer through, refuse with a clear error. |
-| Owned rules only | The share record stores the exact MeshGuard rule(s) it created (path + rule text). `share-stop` and expiry remove **only** those owned rules. They never delete an allow the operator wrote by hand. |
+| Owned rules only | The share record stores a generated ownership marker (rule id) for each MeshGuard rule it created. `share-stop` and expiry remove **only** those owned rules. Path + rule text alone is not enough: an identical hand-written allow must not be deleted. Refuse to create a share rule that would be ambiguous with an existing unmarked allow. |
 | Visible | Room members see sharer, port, mesh URL, started-at, expires-at, and status. |
 | Expiry / stop | Intent is cleared immediately; reachability may lag until MeshGuard reloads (see statuses below). |
 | Outside the site | No preview origin on `meshrooms.wormdb.dev`. Recipients open `http://<mesh-ip>:<port>/` on their own machine. |
@@ -80,20 +80,23 @@ hot-reload:
    per-peer allow for that TCP port (config file or `meshguard service allow
    --peer …`), record those owned rules on the share, then set `pending-enable`
    until MeshGuard restarts (or a future hot-reload succeeds).
-4. **Announce** the share to the paired room over the existing MeshGuard
-   application channel (structured share event, not a chat impersonation). The
-   other node shows it in transport/share status; a short human-visible notice
-   can mirror it once. Announcements include the status so recipients see
-   `pending-enable` / `pending-disable` honestly.
-5. **Stop** removes only the owned rules, announces stop, and sets
-   `pending-disable` until MeshGuard reloads; then `stopped`.
+4. **Announce (follow-up):** today's peer bridge only accepts `chunk` / `ack` /
+   `file-ack`. A room-visible share card needs a new authenticated, room-scoped
+   share event type plus a receiver. Until that lands, the first slice records
+   share state **locally** and documents the mesh URL for the operator to copy;
+   do not pretend chat or the existing datagram channel carries share
+   announcements.
+5. **Stop** removes only the owned rules (by ownership marker), sets
+   `pending-disable` until MeshGuard reloads, then `stopped`. Cross-node
+   announce of stop waits on the same share-event follow-up.
 
 Do not claim the port is reachable while status is `pending-enable`.
 Do not claim the port is closed while status is `pending-disable`.
 
 ## Recipient flow
 
-1. See the share in room/transport status: `http://10.x.x.x:4173/` plus status.
+1. Obtain the mesh URL from the operator (first slice) or from a future share
+   event: `http://10.x.x.x:4173/` plus status.
 2. Open it in a local browser on the recipient machine (mesh routing already up)
    only when status is `active`.
 3. When the share is `pending-disable` or `stopped`, treat the URL as untrusted;
@@ -103,7 +106,10 @@ Do not claim the port is closed while status is `pending-disable`.
 
 - MeshGuard: control-socket `SERVICEALLOW` / `SERVICEDENY` / `SERVICERELOAD` so
   share/stop does not restart the daemon.
-- Binding helper: optional wrapper that runs `vite preview --host <mesh-ip>`.
+- Authenticated share announce/stop events on the Meshrooms peer bridge (new
+  packet kinds, verified like file-ack).
+- Binding helper: optional wrapper that runs `vite preview --host <mesh-ip>`
+  (mesh IP only).
 - Multi-port or multi-peer shares.
 - Browser-room agent-to-agent TCP tunnel (separate design).
 
