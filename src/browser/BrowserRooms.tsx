@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type RefObject } from 'react';
 import { mentionedIds, type Task, type TaskStatus } from '../collab';
 import { FloorControl, MAX_MESSAGE_FILES, MAX_UPLOAD_BYTES, MentionText, MessageAttachments, PendingFiles, TaskBoard, formatBytes, uploadName, useAutoGrow, useMentions, useStickToBottom, type AttachmentSource, type PendingFile } from '../prototype/Collaboration';
 import { Wordmark } from '../prototype/RoomPrototype';
@@ -7,6 +7,7 @@ import { deriveActivity, duration, type ActivityRecord, type AgentActivity } fro
 import { taskTimeline, type TaskBody, type TaskEvent } from './board';
 import { BrowserApi } from './client';
 import { IMAGE_TYPES, attachmentRef, displayKind, shownText, type AttachmentRef } from './files';
+import { BOARD_DEFAULT, BOARD_STEP, boardLimits, clampBoardWidth, saveBoardWidth, savedBoardWidth } from './panel';
 import { BrowserPeers, type FileView, type SavedMessage } from './peers';
 import { identity, read, write } from './storage';
 import { DEFAULT_ROOM_SETTINGS, base64, type BrowserMember, type JoinRequest, type RoomSettings, type RoomStatus } from './protocol';
@@ -34,6 +35,51 @@ function RoomIcon({ kind }: { kind: 'people' | 'link' | 'close' | 'chat' | 'send
     expand: <path d="m13 17 5-5-5-5M6 17l5-5-5-5" />,
   };
   return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[kind]}</svg>;
+}
+
+/**
+ * The task board's left edge. While dragging, the width goes straight to the workspace's CSS variable, so the room
+ * does not re-render per pixel; it is committed (and saved) when the drag ends.
+ */
+function BoardHandle({ workspace, width, onCommit }: { workspace: RefObject<HTMLDivElement | null>; width: number; onCommit: (width: number | undefined) => void }) {
+  const [space, setSpace] = useState(() => ({ available: innerWidth, viewport: innerWidth }));
+  useEffect(() => {
+    const node = workspace.current; if (!node) return;
+    const sizes = new ResizeObserver(() => setSpace({ available: node.clientWidth, viewport: innerWidth }));
+    sizes.observe(node);
+    return () => sizes.disconnect();
+  }, [workspace]);
+  const handle = useRef<HTMLDivElement>(null), drag = useRef<{ x: number; from: number; value: number } | null>(null);
+  const { min, max } = boardLimits(space.available, space.viewport), value = clampBoardWidth(width, space.available, space.viewport);
+  function preview(next: number) {
+    workspace.current?.style.setProperty('--board-width', `${next}px`); handle.current?.setAttribute('aria-valuenow', String(next));
+  }
+  function end() {
+    if (!drag.current) return;
+    const { value } = drag.current; drag.current = null;
+    document.documentElement.classList.remove('board-resizing'); onCommit(value);
+  }
+  return <div ref={handle} className="board-handle" role="separator" aria-orientation="vertical" aria-controls="task-board" aria-label="Resize tasks panel" tabIndex={0}
+    aria-valuenow={value} aria-valuemin={min} aria-valuemax={max} title="Drag to resize · double-click to reset"
+    onPointerDown={event => {
+      if (event.button !== 0) return;
+      event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);
+      drag.current = { x: event.clientX, from: value, value }; document.documentElement.classList.add('board-resizing');
+    }}
+    onPointerMove={event => {
+      const current = drag.current; if (!current) return;
+      const next = clampBoardWidth(current.from + current.x - event.clientX, workspace.current?.clientWidth ?? space.available, innerWidth);
+      if (next !== current.value) { current.value = next; preview(next); }
+    }}
+    onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end}
+    onDoubleClick={() => onCommit(undefined)}
+    onKeyDown={event => {
+      // The handle is on the board's left edge: moving it left widens the board.
+      const step = event.key === 'ArrowLeft' ? BOARD_STEP : event.key === 'ArrowRight' ? -BOARD_STEP : 0;
+      const next = step ? value + step : event.key === 'Home' ? min : event.key === 'End' ? max : undefined;
+      if (next === undefined) return;
+      event.preventDefault(); onCommit(clampBoardWidth(next, space.available, space.viewport));
+    }} />;
 }
 
 const isAgent = (member: BrowserMember | undefined) => member?.role === 'agent';
@@ -105,6 +151,8 @@ export function BrowserRooms() {
   const [confirming, setConfirming] = useState<string>();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [boardOpen, setBoardOpen] = useState(false);
+  const [boardWidth, setBoardWidth] = useState(savedBoardWidth);
+  const workspace = useRef<HTMLDivElement>(null);
   const [railCollapsed, setRailCollapsed] = useState(() => { try { return localStorage.getItem('meshrooms:rail') === 'collapsed'; } catch { return false; } });
   useEffect(() => { try { localStorage.setItem('meshrooms:rail', railCollapsed ? 'collapsed' : 'open'); } catch { /* storage may be unavailable */ } }, [railCollapsed]);
   const [avatarFor, setAvatarFor] = useState<string>();
@@ -482,7 +530,7 @@ export function BrowserRooms() {
                 {(r.kind !== 'companion' || r.linkedMemberId) && <button className="primary" disabled={busy} onClick={() => void act(async () => { await api.command('decide', urlRoom, { requestId: r.id, admit: true }); })}>Admit</button>}</div></div>)}
           </section>}
           <p className="sr-only" aria-live="polite" aria-atomic="true">{liveMessage && <span key={liveMessage.id}>{liveMessage.text}</span>}</p>
-          <div className="browser-workspace">
+          <div ref={workspace} className="browser-workspace" style={{ '--board-width': `${boardWidth}px` } as CSSProperties}>
             <div className={`browser-conversation ${dragging ? 'dragging' : ''}`}
               onDragEnter={e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragging(true); } }}
               onDragOver={e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } }}
@@ -544,6 +592,7 @@ export function BrowserRooms() {
                 <p className="browser-connection" role="status"><span className={`browser-connection-dot ${connected.length ? 'is-connected' : ''}`} aria-hidden="true" />{connected.length ? `Connected to ${connected.length} other device${connected.length === 1 ? '' : 's'}` : status.devices!.length > 1 ? 'Waiting for another device to connect' : 'You’re the first one here'}</p>
               </div>
             </div>
+            {boardOpen && <BoardHandle workspace={workspace} width={boardWidth} onCommit={width => { setBoardWidth(width ?? BOARD_DEFAULT); saveBoardWidth(width); }} />}
             {boardOpen && <TaskBoard room={boardRoom} viewerId={status.memberId} disabled={!admitted} onClose={() => setBoardOpen(false)} actions={boardActions} highlight={highlight} working={workingOn} />}
             <aside id="browser-room-details" className="browser-details" aria-label="Room details" hidden={!detailsOpen} onKeyDown={e => { if (e.key === 'Escape') closeDetails(); }}>
               <header className="browser-details-heading"><h2 tabIndex={-1} ref={detailsHeading}>Room details</h2><button className="browser-close" aria-label="Close room details" onClick={closeDetails}><RoomIcon kind="close" /></button></header>
