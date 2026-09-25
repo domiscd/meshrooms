@@ -429,3 +429,33 @@ test('members set small pictures for themselves and their agents; the host can o
     expect((await handle(new Request(`${origin}/api/lobby/rooms/${room}/avatars/${samId}?h=${again}`))).status).toBe(404);
   } finally { lobby.close(); }
 });
+
+test('agents report their harness and model; only the agent or its operator sets them, and the host can clear them', async () => {
+  const lobby = new BrowserLobby(':memory:', { origin });
+  try {
+    const host = await client(lobby), room = crypto.randomUUID();
+    await host.send('create', room, { title: 'Work', name: 'Alex', label: 'Desktop' });
+    const sam = await admitPerson(lobby, host, room, 'Sam'), agent = await client(lobby);
+    const { token } = await sam.send('agent-invite', room, { name: 'Codex' }) as { token: string };
+    await agent.send('agent-redeem', room, { token, label: 'Node' });
+    const codexId = (await agent.status(room)).memberId!, samId = (await sam.status(room)).memberId!;
+    const codex = async () => (await host.status(room)).members!.find(m => m.id === codexId)!;
+
+    await agent.send('profile', room, { harness: ' Codex CLI ', model: 'gpt-5.1-codex' });
+    expect(await codex()).toMatchObject({ harness: 'Codex CLI', model: 'gpt-5.1-codex' });
+    await sam.send('profile', room, { model: 'o4-mini', memberId: codexId });
+    expect(await codex()).toMatchObject({ harness: 'Codex CLI', model: 'o4-mini' });
+    // Plain text only: nothing that could render as markup or pose as another line.
+    for (const bad of ['<b>x</b>', 'a\nb', '', ' ', 'x'.repeat(49), '**bold**', '`code`']) await expect(agent.send('profile', room, { model: bad })).rejects.toThrow('up to 48');
+    await expect(sam.send('profile', room, { harness: 'Claude Code' })).rejects.toThrow('Only agents');
+    await expect(host.send('profile', room, { model: 'other', memberId: codexId })).rejects.toThrow('agent or its operator');
+    await host.send('profile', room, { harness: null, model: null, memberId: codexId });
+    expect(await codex()).not.toHaveProperty('model');
+    expect(await codex()).not.toHaveProperty('harness');
+    // A picture and the runtime can change together; an empty change is refused.
+    await agent.send('profile', room, { avatar: png(32, 32), harness: 'Claude Code' });
+    expect(await codex()).toMatchObject({ harness: 'Claude Code', avatar: expect.stringMatching(/^[a-f0-9]{16}$/) });
+    await expect(agent.send('profile', room, {})).rejects.toThrow('what to change');
+    expect((await host.status(room)).members!.find(m => m.id === samId)).not.toHaveProperty('harness');
+  } finally { lobby.close(); }
+});

@@ -96,21 +96,47 @@
 .task-add select,.task-details select{font:inherit;font-size:11px;border:1px solid #b8c3d1;border-radius:8px;padding:8px 10px;background:#fff;color:var(--ink);min-height:38px;min-width:0;flex:1}
 .task-add .primary{font-size:11px;min-height:38px}
 .board-columns{display:flex;flex-direction:column;gap:20px}
+.board-filters{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none;margin:-6px;padding:6px;flex-shrink:0}
+.board-filters button{gap:6px;padding:6px 10px;min-height:32px;font-size:11px;border-radius:7px;color:#52657d;border:1px solid transparent;white-space:nowrap;flex-shrink:0}
+.board-filters button:hover{background:#e9edf4}
+.board-filters button[aria-pressed=true]{background:#dde7fa;color:#234c99;border-color:#c6d5f3}
+.board-filters button>span{font-size:10px;font-weight:500;color:inherit;opacity:.75}
 .board-column h3{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;margin:0 0 8px;color:#475569}
+.board-disclosure{gap:8px;padding:0 8px 0 0;min-height:32px;font:inherit;color:inherit;border-radius:6px}
+.board-disclosure:hover{color:var(--ink)}
+.board-chevron{flex-shrink:0;transition:transform .15s}
+.board-chevron.open{transform:rotate(90deg)}
+.board-more{margin-top:8px;min-height:32px;padding:0 8px;font-size:11px;color:var(--blue);border-radius:7px}
+.board-more:hover{background:#eaf0fd}
 .board-column h3>span{font-size:10px;font-weight:500;color:var(--muted)}
 .board-column ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
 .board-empty{font-size:10px;color:var(--muted);padding:10px 0}
-.task-card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 12px;transition:border-color .3s,box-shadow .3s}
+.task-card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:8px 6px 8px 12px;transition:border-color .3s,box-shadow .3s}
 .board-column.done .task-card{background:#fbfcfd}
-.board-column.done .task-title{color:var(--muted);text-decoration:line-through;text-decoration-color:#b8c3d1}
-.task-top{display:flex;align-items:flex-start;gap:8px}
-.task-title{flex:1;justify-content:flex-start;text-align:left;font-size:12px;font-weight:650;padding:4px 0;min-height:32px;overflow-wrap:anywhere}
+.board-column.done .task-title,.board-column.done .task-assignee{color:var(--muted)}
+/* Rows overlap the card padding so their buttons keep 32px targets without making the card taller. */
+.task-top{display:flex;align-items:flex-start;gap:8px;margin:-4px 0}
+.task-title{flex:1;justify-content:flex-start;text-align:left;font-size:12px;font-weight:650;padding:6px 0;min-height:32px;min-width:0;overflow-wrap:anywhere;border-radius:4px}
 .task-advance{font-size:10px;color:var(--blue);padding:6px 8px;min-height:32px;border-radius:7px;flex-shrink:0}
 .task-advance:hover{background:#eaf0fd}
-.task-meta{display:flex;align-items:center;gap:8px;margin-top:2px;font-size:10px;color:var(--muted)}
+.task-meta{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;min-height:20px;margin-top:4px;padding-right:6px;font-size:10px;color:var(--muted)}
 .task-assignee{display:inline-flex;align-items:center;gap:6px;font-weight:600;color:#475569}
 .task-assignee.none{font-weight:400;color:var(--muted)}
-.task-has-notes{margin-left:auto}
+.task-assignee .mention-avatar{width:18px;height:18px;font-size:9px}
+.task-assignee .mention-avatar.agent{border-radius:5px}
+.board-column.done .mention-avatar{opacity:.7}
+.task-notes-toggle{gap:2px;margin:-6px -6px -6px auto;padding:0 6px;min-height:32px;font-size:10px;font-weight:600;color:var(--muted);border-radius:6px}
+.task-notes-toggle:hover{color:var(--ink);background:var(--soft)}
+.task-notes{margin:4px 6px 2px 0;font-size:11px;line-height:1.65;color:#475569;white-space:pre-wrap;overflow-wrap:anywhere}
+/* Wide boards put the statuses side by side, each scrolling on its own. */
+.task-board.is-wide{overflow:hidden}
+.is-wide .task-add{flex-direction:row}
+.is-wide .task-add>input{flex:1;min-width:0}
+.is-wide .task-add>div{flex:0 1 300px}
+.is-wide .board-columns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;flex:1;min-height:0}
+.is-wide .board-column{display:flex;flex-direction:column;min-height:0}
+.is-wide .board-column h3{min-height:32px;margin-bottom:4px}
+.is-wide .board-list{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;margin:0 -6px;padding:4px 6px 16px}
 .task-details{display:flex;flex-direction:column;gap:10px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
 .task-details label{display:flex;flex-direction:column;gap:5px;font-size:10px;font-weight:650;color:#475569}
 .task-details textarea{font-size:11px;min-height:70px}

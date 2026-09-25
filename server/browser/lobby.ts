@@ -33,6 +33,11 @@ function nameAvailable(room: Room, name: string, pending: StoredInvite[] = []) {
   if (taken.some(n => n.toLowerCase() === name.toLowerCase())) fail(409, 'Someone in this room already uses that name. Choose another agent name.');
 }
 const settingsOf = (room: Room): RoomSettings => ({ ...DEFAULT_ROOM_SETTINGS, ...room.settings });
+/** A harness or model name as the agent reports it: short plain text, so it can't pose as markup or another line. */
+function runtimeLabel(value: unknown, key: 'harness' | 'model') {
+  if (typeof value !== 'string' || !/^[\p{L}\p{N}][\p{L}\p{N} ._:+()/@-]{0,47}$/u.test(value.trim())) fail(400, `Give a ${key} of up to 48 letters, digits, spaces or . _ : + ( ) / @ -.`);
+  return value.trim();
+}
 export type LobbyOptions = { origin: string; now?: () => number; stunUrls?: string[]; turnUrls?: string[]; turnSecret?: string };
 
 /** SQLite stores admission only. Signaling/presence expire in memory; no chat passes through this service. */
@@ -206,14 +211,27 @@ export class BrowserLobby {
             const target = c.payload.memberId === undefined ? actor.memberId : c.payload.memberId;
             const member = room.members.find(m => m.id === target) || fail(404, 'That person is not in this room.');
             const own = member.id === actor.memberId, operated = member.role === 'agent' && member.operatorId === actor.memberId;
-            if (c.payload.avatar === null) {
+            const { avatar: encoded, harness, model } = c.payload;
+            if (encoded === undefined && harness === undefined && model === undefined) fail(400, 'Choose what to change.');
+            if (harness !== undefined || model !== undefined) {
+              // Agents say which harness and model they run on; people have neither. Clearing follows the picture rule.
+              if (member.role !== 'agent') fail(400, 'Only agents report a harness and model.');
+              const clearing = (harness === null || harness === undefined) && (model === null || model === undefined);
+              if (!own && !operated && !(clearing && isHost)) fail(403, 'Only the agent or its operator can change this.');
+              for (const [key, value] of [['harness', harness], ['model', model]] as const) {
+                if (value === undefined) continue;
+                if (value === null) { delete member[key]; continue; }
+                member[key] = runtimeLabel(value, key);
+              }
+            }
+            if (encoded === undefined) break;
+            if (encoded === null) {
               // The host may clear anyone's picture; setting one is for yourself or the agents you operate.
               if (!own && !operated && !isHost) fail(403, 'You can only change your own picture or your agents’.');
               delete member.avatar; this.db.query('DELETE FROM avatars WHERE room=? AND member=?').run(room.id, member.id);
               break;
             }
             if (!own && !operated) fail(403, 'You can only change your own picture or your agents’.');
-            const encoded = c.payload.avatar;
             if (typeof encoded !== 'string' || encoded.length > Math.ceil(AVATAR_BYTES / 3) * 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) fail(413, 'Use a picture of at most 16 KB.');
             const bytes = new Uint8Array(Buffer.from(encoded, 'base64'));
             if (!bytes.length || bytes.length > AVATAR_BYTES) fail(413, 'Use a picture of at most 16 KB.');

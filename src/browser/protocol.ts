@@ -9,7 +9,8 @@ export type SignedCommand = { command: Command; publicKey: string; signature: st
 export type BrowserDevice = { id: string; publicKey: string; label: string; memberId: string; admittedAt: number };
 /** Members without a role joined before agents existed and are people. An agent's operator is the member who confirmed it. */
 /** `avatar` is a short hash of the member's picture; fetch it from /api/lobby/rooms/:room/avatars/:member?h=<hash>. */
-export type BrowserMember = { id: string; name: string; role?: 'human' | 'agent'; operatorId?: string; avatar?: string };
+/** Agents report `harness` (e.g. Claude Code) and `model` themselves; the room cannot verify either. */
+export type BrowserMember = { id: string; name: string; role?: 'human' | 'agent'; operatorId?: string; avatar?: string; harness?: string; model?: string };
 /** `agent` requests come only from a redeemed agent link while the host requires approval for guests' agents. */
 export type JoinRequest = {
   id: string; device: BrowserDevice; name: string; kind: 'person' | 'companion' | 'agent';
