@@ -312,7 +312,8 @@ export function BrowserRooms() {
     void act(async () => {
       if (!peers.current) throw new Error('Room connection is not ready.');
       await peers.current.send(draft, replyTo, sending.map(f => ({ ref: f.ref!, bytes: f.bytes! })));
-      setText(''); setReplyId(undefined);
+      // Keep anything typed while this message was being sent.
+      setText(current => current === draft ? '' : current); setReplyId(undefined);
       sending.forEach(f => f.preview && URL.revokeObjectURL(f.preview));
       setChosen(current => current.filter(f => !sending.includes(f)));
     });
