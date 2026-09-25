@@ -4,6 +4,7 @@ import { verify, type BrowserDevice, type RoomStatus } from './protocol';
 import { BrowserApi } from './client';
 import { FileTransfers, IMAGE_TYPES, MAX_MESSAGE_ATTACHMENTS, attachmentText, isFilePacket, retainedFiles, validAttachments, type AttachmentRef, type TransferState } from './files';
 import { read, sign, update, write } from './storage';
+import { isActivityPacket, receiveActivity, validActivityPacket, type ActivityRecord } from './activity';
 
 /** `replyTo` and `attachments` are optional so browsers from before them keep verifying and storing these packets. */
 type MessageBody = { kind: 'message'; roomId: string; id: string; deviceId: string; memberId: string; text: string; at: number; replyTo?: string; attachments?: AttachmentRef[] };
@@ -37,9 +38,12 @@ export class BrowserPeers {
   private urls = new Map<string, string>();
   private fileSerial: Promise<unknown> = Promise.resolve();
   private files: FileTransfers;
+  /** Latest activity per agent device with an open channel; memory only, dropped when the channel closes. */
+  private activity = new Map<string, ActivityRecord>();
   constructor(private api: BrowserApi, private roomId: string, private deviceId: string, private session: string,
     private changed: (messages: SavedMessage[], connected: string[], added?: SavedMessage) => void, private error: (message: string) => void,
-    private boardChanged: (tasks: Task[], ops: TaskBody[]) => void = () => {}, private filesChanged: (files: Record<string, FileView>) => void = () => {}) {
+    private boardChanged: (tasks: Task[], ops: TaskBody[]) => void = () => {}, private filesChanged: (files: Record<string, FileView>) => void = () => {},
+    private activityChanged: (activity: Record<string, ActivityRecord>) => void = () => {}) {
     this.key = `messages:${deviceId}:${roomId}`;
     this.boardKey = `board:${deviceId}:${roomId}`;
     this.filesKey = `files:${deviceId}:${roomId}`;
@@ -134,6 +138,14 @@ export class BrowserPeers {
   private sendBoard(channel: RTCDataChannel) {
     for (const chunk of syncChunks(this.roomId, this.ops)) { try { channel.send(JSON.stringify(chunk)); } catch { return; } }
   }
+  private notifyActivity() { if (!this.stopped) this.activityChanged(Object.fromEntries(this.activity)); }
+  private forget(id: string) { if (this.activity.delete(id)) this.notifyActivity(); }
+  /** Only an agent's own device speaks for it, on its own channel. */
+  private acceptActivity(id: string, packet: unknown) {
+    const device = this.status?.devices?.find(d => d.id === id);
+    if (!device || this.status?.members?.find(m => m.id === device.memberId)?.role !== 'agent' || !validActivityPacket(packet, this.roomId)) return;
+    this.activity.set(id, receiveActivity(packet)); this.notifyActivity();
+  }
   private notify(added?: SavedMessage) { if (!this.stopped) this.changed([...this.messages], [...this.peers].filter(([, p]) => p.channel?.readyState === 'open').map(([id]) => id), added); }
   private transaction<T>(work: () => Promise<T>): Promise<T> {
     const next = this.serial.then(work); this.serial = next.catch(() => {}); return next;
@@ -177,7 +189,7 @@ export class BrowserPeers {
   private connectChannel(peer: Peer, id: string, channel: RTCDataChannel) {
     peer.channel = channel;
     channel.onopen = () => { this.flush(); this.sendBoard(channel); this.files.opened(id); this.notify(); };
-    channel.onclose = () => { if (this.peers.get(id) === peer) this.files.closed(id); this.notify(); };
+    channel.onclose = () => { if (this.peers.get(id) === peer) { this.files.closed(id); this.forget(id); } this.notify(); };
     channel.onmessage = event => {
       if (typeof event.data !== 'string' || event.data.length > 20_000) return;
       let packet: Packet;
@@ -187,6 +199,7 @@ export class BrowserPeers {
         if (!this.stopped && this.peers.get(id) === peer && this.status?.devices?.some(d => d.id === id)) this.files.handle(id, packet);
         return;
       }
+      if (isActivityPacket(packet)) { if (!this.stopped && this.peers.get(id) === peer) this.acceptActivity(id, packet); return; }
       if (this.pendingIncoming >= 64) return;
       this.pendingIncoming++;
       void this.transaction(async () => {
@@ -243,7 +256,7 @@ export class BrowserPeers {
     const available = (status.devices || []).filter(d => d.id !== this.deviceId && d.session);
     for (const [id, peer] of this.peers) {
       if (!available.some(d => d.id === id && d.session === peer.session) || ['failed', 'closed'].includes(peer.pc.connectionState) || (peer.pc.connectionState !== 'connected' && Date.now() - peer.started > 20_000)) {
-        peer.pc.close(); this.peers.delete(id); this.files.closed(id);
+        peer.pc.close(); this.peers.delete(id); this.files.closed(id); this.forget(id);
       }
     }
     this.files.tick();
@@ -255,7 +268,7 @@ export class BrowserPeers {
         let peer = this.peers.get(device.id);
         if (signal.description.type === 'offer') {
           if (device.id > this.deviceId) return;
-          if (peer) { peer.pc.close(); this.files.closed(device.id); } peer = this.peer(device);
+          if (peer) { peer.pc.close(); this.files.closed(device.id); this.forget(device.id); } peer = this.peer(device);
           await peer.pc.setRemoteDescription(signal.description);
           await this.description(device.id, peer, false);
         } else if (peer?.pc.signalingState === 'have-local-offer') await peer.pc.setRemoteDescription(signal.description);
@@ -274,7 +287,7 @@ export class BrowserPeers {
   private disconnect() {
     const ids = [...this.peers.keys()];
     for (const peer of this.peers.values()) peer.pc.close();
-    this.peers.clear(); for (const id of ids) this.files.closed(id);
+    this.peers.clear(); for (const id of ids) { this.files.closed(id); this.forget(id); }
   }
   stop() { this.stopped = true; this.disconnect(); for (const url of this.urls.values()) URL.revokeObjectURL(url); this.urls.clear(); }
 }

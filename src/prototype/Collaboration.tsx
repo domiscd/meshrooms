@@ -185,7 +185,8 @@ type BoardActions = {
   remove: (task: Task) => Promise<void>;
 };
 
-export function TaskBoard({ room, viewerId, disabled, onClose, actions, highlight }: { room: RoomSnapshot; viewerId?: string; disabled: boolean; onClose: () => void; actions: BoardActions; highlight?: string }) {
+/** `working` names the agents currently working on each task, by task id (browser rooms report agent activity). */
+export function TaskBoard({ room, viewerId, disabled, onClose, actions, highlight, working }: { room: RoomSnapshot; viewerId?: string; disabled: boolean; onClose: () => void; actions: BoardActions; highlight?: string; working?: Record<string, string[]> }) {
   const [title, setTitle] = useState(''); const [assignee, setAssignee] = useState(''); const [busy, setBusy] = useState(false);
   const tasks = room.tasks || []; const local = room.participants.filter(p => p.state === 'local');
   const open = tasks.filter(t => t.status !== 'done').length;
@@ -210,13 +211,13 @@ export function TaskBoard({ room, viewerId, disabled, onClose, actions, highligh
       return <section key={status} className={`board-column ${status}`} aria-labelledby={`board-${status}`}>
         <h3 id={`board-${status}`}>{statusLabels[status]}<span>{items.length}</span></h3>
         {items.length === 0 ? <p className="board-empty">{status === 'todo' ? 'Nothing waiting.' : status === 'doing' ? 'Nobody is working on a task.' : 'No finished tasks yet.'}</p>
-          : <ul>{items.map(task => <TaskCard key={task.id} task={task} room={room} viewerId={viewerId} disabled={disabled} actions={actions} highlighted={task.id === highlight} />)}</ul>}
+          : <ul>{items.map(task => <TaskCard key={task.id} task={task} room={room} viewerId={viewerId} disabled={disabled} actions={actions} highlighted={task.id === highlight} working={working?.[task.id]} />)}</ul>}
       </section>;
     })}</div>
   </aside>;
 }
 
-function TaskCard({ task, room, viewerId, disabled, actions, highlighted }: { task: Task; room: RoomSnapshot; viewerId?: string; disabled: boolean; actions: BoardActions; highlighted?: boolean }) {
+function TaskCard({ task, room, viewerId, disabled, actions, highlighted, working }: { task: Task; room: RoomSnapshot; viewerId?: string; disabled: boolean; actions: BoardActions; highlighted?: boolean; working?: string[] }) {
   const card = useRef<HTMLLIElement>(null);
   useEffect(() => {
     if (!highlighted) return;
@@ -238,6 +239,7 @@ function TaskCard({ task, room, viewerId, disabled, actions, highlighted }: { ta
     <div className="task-meta">
       {assignee ? <span className={`task-assignee ${assignee.role}`}>{assignee.id === viewerId ? 'You' : assignee.name}{assignee.role === 'agent' && <span className="role-label">agent</span>}</span> : <span className="task-assignee none">Unassigned</span>}
       {task.notes && !expanded && <span className="task-has-notes">Notes</span>}
+      {!!working?.length && <span className="task-working">{working.join(', ')} working</span>}
     </div>
     {expanded && <div className="task-details">
       <label>Assignee<select value={task.assigneeId || ''} disabled={lock} onChange={e => run(() => actions.update(task, { assigneeId: e.target.value || null }))}><option value="">Unassigned</option>{local.map(p => <option key={p.id} value={p.id}>{p.id === viewerId ? `${p.name} (you)` : p.name}{p.role === 'agent' ? ' · agent' : ''}</option>)}</select></label>

@@ -71,3 +71,14 @@
 .browser-task-line button:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
 .browser-task-line time{font-variant-numeric:tabular-nums;margin-left:-4px}
 @media(max-width:760px){.browser-task-line{grid-template-columns:28px minmax(0,max-content) auto}}
+/* Agent activity: the text says the state; the dot on the picture only repeats it. */
+.browser-person-avatar{position:relative;display:inline-flex;flex-shrink:0}
+.agent-dot{position:absolute;right:-3px;bottom:-3px;width:12px;height:12px;border-radius:50%;border:2px solid var(--soft);background:#a3adba}
+.agent-dot.is-online{background:var(--soft);box-shadow:inset 0 0 0 2px #3f8f6f}.agent-dot.is-idle{background:#3f8f6f}.agent-dot.is-working{background:#d49423}.agent-dot.is-quiet{opacity:.55}
+.browser-person>div>span.agent-activity{color:var(--ink);overflow-wrap:anywhere}
+.browser-person>div>span.agent-activity.is-offline,.agent-activity-age,.agent-activity-quiet{color:var(--muted)}
+.agent-activity-link{display:inline;padding:0;font-weight:600;color:var(--blue);text-decoration:underline;text-underline-offset:3px;text-align:left}
+.browser-person>div>span.agent-activity-note{font-style:italic;margin-top:2px;overflow-wrap:anywhere}
+.browser-message-highlight{background:#f1f5ff;box-shadow:inset 3px 0 0 var(--blue);margin-left:-14px;padding-left:14px}
+@media(max-width:760px){.browser-message-highlight{margin-left:-10px;padding-left:10px}}
+.task-working{display:inline-flex;align-items:center;gap:5px;margin-left:auto;font-weight:600;color:#7a5510}.task-working::before{content:'';width:6px;height:6px;border-radius:50%;background:#d49423}.task-has-notes+.task-working{margin-left:0}

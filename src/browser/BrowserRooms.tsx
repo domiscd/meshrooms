@@ -3,6 +3,7 @@ import { mentionedIds, type Task, type TaskStatus } from '../collab';
 import { FloorControl, MAX_MESSAGE_FILES, MAX_UPLOAD_BYTES, MentionText, MessageAttachments, PendingFiles, TaskBoard, formatBytes, uploadName, useAutoGrow, useMentions, useStickToBottom, type AttachmentSource, type PendingFile } from '../prototype/Collaboration';
 import { Wordmark } from '../prototype/RoomPrototype';
 import type { Attachment, Participant, RoomSnapshot, TaskDraft } from '../room';
+import { deriveActivity, duration, type ActivityRecord, type AgentActivity } from './activity';
 import { taskTimeline, type TaskBody, type TaskEvent } from './board';
 import { BrowserApi } from './client';
 import { IMAGE_TYPES, attachmentRef, displayKind, shownText, type AttachmentRef } from './files';
@@ -109,6 +110,8 @@ export function BrowserRooms() {
   const fileInput = useRef<HTMLInputElement>(null);
   const [taskOps, setTaskOps] = useState<TaskBody[]>([]);
   const [highlight, setHighlight] = useState<string>();
+  const [activity, setActivity] = useState<Record<string, ActivityRecord>>({});
+  const [now, setNow] = useState(() => Date.now());
   const composer = useRef<HTMLTextAreaElement>(null);
   const currentStatus = useRef<RoomStatus | undefined>(undefined);
   const lastRequest = useRef<JoinRequest | undefined>(undefined);
@@ -178,7 +181,8 @@ export function BrowserRooms() {
             }
           }
           setMessages(m); setConnected(c);
-        }, message => { if (!disposed) setNetwork(message); }, (board, ops) => { if (!disposed) { setTasks(board); setTaskOps(ops); } }, view => { if (!disposed) setFiles(view); });
+        }, message => { if (!disposed) setNetwork(message); }, (board, ops) => { if (!disposed) { setTasks(board); setTaskOps(ops); } }, view => { if (!disposed) setFiles(view); },
+        records => { if (!disposed) { setActivity(records); setNow(Date.now()); } });
         peers.current = engine; await engine.load();
         while (!disposed) {
           try {
@@ -215,6 +219,12 @@ export function BrowserRooms() {
     return () => { disposed = true; engine?.stop(); peers.current = null; clearTimeout(timer); wake?.(); };
   }, [api, retry]);
   useEffect(() => { if (detailsOpen) detailsHeading.current?.focus(); }, [detailsOpen]);
+  // Activity durations and staleness move with the clock, not only with packets.
+  useEffect(() => {
+    if (!agents.length) return;
+    const timer = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, [agents.length]);
   useEffect(() => {
     if (!admitted || !notice) return;
     const timeout = setTimeout(() => setNotice(''), 6000);
@@ -227,6 +237,37 @@ export function BrowserRooms() {
     return () => clearTimeout(timeout);
   }, [highlight]);
   function showTask(taskId: string) { setBoardOpen(true); setDetailsOpen(false); setHighlight(taskId); }
+  function showMessage(id: string) {
+    setDetailsOpen(false); setHighlight(id);
+    requestAnimationFrame(() => document.getElementById(`message-${id}`)?.scrollIntoView({ block: 'center' }));
+  }
+  /** An agent's activity as the freshest report from any of its devices this browser is connected to. */
+  const activityOf = (member: BrowserMember): AgentActivity => {
+    const devices = status?.devices?.filter(d => d.memberId === member.id && connected.includes(d.id)) || [];
+    return deriveActivity(devices.map(d => activity[d.id]), devices.length > 0, now);
+  };
+  const activities = new Map(agents.map(agent => [agent.id, activityOf(agent)]));
+  const working = [...activities.values()].filter(a => a.state === 'working').length;
+  /** Task id → names of agents working on it right now, for markers on the board. */
+  const workingOn: Record<string, string[]> = {};
+  for (const agent of agents) {
+    const a = activities.get(agent.id);
+    if (a?.state === 'working' && a.quiet === undefined) for (const id of a.on.tasks || []) (workingOn[id] ||= []).push(agent.name);
+  }
+  /** "Working on “Fix header” · 4 min", "Replying to Igor · 1 min", "Idle · 12 min", with links to the task or message. */
+  function activityLine(a: AgentActivity) {
+    if (a.state === 'offline' || a.state === 'online') return <span className={`agent-activity is-${a.state}`}>{a.state === 'offline' ? 'Offline' : 'Online'}</span>;
+    const age = <span className="agent-activity-age"> · {duration(now - a.since)}</span>;
+    if (a.state === 'idle') return <span className="agent-activity is-idle">Idle{a.quiet === undefined ? age : <span className="agent-activity-quiet"> · no check-in for {duration(a.quiet)}</span>}</span>;
+    if (a.quiet !== undefined) return <span className="agent-activity is-working is-quiet">Busy<span className="agent-activity-quiet"> · no check-in for {duration(a.quiet)}</span></span>;
+    const task = a.on.tasks?.map(id => tasks.find(t => t.id === id)).find(Boolean);
+    if (task) return <span className="agent-activity is-working">Working on <button className="agent-activity-link" title="Show on the task board" onClick={() => showTask(task.id)}>“{task.title}”</button>{age}</span>;
+    const woke = (a.on.messages || []).map(id => messages.find(m => m.packet.body.id === id)?.packet.body).filter(b => !!b);
+    if (!woke.length) return <span className="agent-activity is-working">Working{age}</span>;
+    const authors = [...new Set(woke.map(b => b.memberId === status?.memberId ? 'you' : nameOf(b.memberId)))];
+    const latest = woke.at(-1)!;
+    return <span className="agent-activity is-working">Replying to <button className="agent-activity-link" title="Show the message" onClick={() => showMessage(latest.id)}>{authors.length > 1 ? `${authors.slice(0, -1).join(', ')} and ${authors.at(-1)}` : authors[0]}</button>{age}</span>;
+  }
   function closeDetails() { setDetailsOpen(false); detailsButton.current?.focus(); }
 
   async function act(work: () => Promise<void>) {
@@ -416,7 +457,7 @@ export function BrowserRooms() {
           </>}
         </section> : <>
           <header className="browser-room-header">
-            <div className="browser-room-heading"><h1>{title}</h1><p>{people} {people === 1 ? 'person' : 'people'}{agents.length ? ` and ${agents.length} agent${agents.length === 1 ? '' : 's'}` : ''} in this room</p></div>
+            <div className="browser-room-heading"><h1>{title}</h1><p>{people} {people === 1 ? 'person' : 'people'}{agents.length ? ` and ${agents.length} agent${agents.length === 1 ? '' : 's'}` : ''} in this room{working ? ` · ${working} working` : ''}</p></div>
             <div className="browser-room-actions"><button className="secondary" aria-expanded={boardOpen} aria-controls="task-board" onClick={() => { setBoardOpen(!boardOpen); setDetailsOpen(false); }}><RoomIcon kind="tasks" />Tasks{openTasks ? <span className="browser-count">{openTasks}</span> : null}</button><button className="secondary" ref={detailsButton} aria-expanded={detailsOpen} aria-controls="browser-room-details" onClick={() => { if (detailsOpen) closeDetails(); else { setDetailsOpen(true); setBoardOpen(false); } }}><RoomIcon kind="people" />Room details</button><button className="primary" onClick={() => void copyInvite()}><RoomIcon kind="link" />Copy room link</button></div>
           </header>
           <p className="sr-only" role="status">{host && status.requests?.length ? `${status.requests.length} request${status.requests.length === 1 ? '' : 's'} waiting to join. Use the join requests section to admit or decline.` : ''}</p>
@@ -458,7 +499,7 @@ export function BrowserRooms() {
                     const shown = shownText(body), quoted = target && (shownText(target) || fileNames(target));
                     return <Fragment key={body.id}>
                       {day}
-                      <article className={`browser-message ${continuation ? 'browser-message-continuation' : ''} ${forYou ? 'browser-message-for-you' : ''} ${isAgent(member) ? 'browser-message-agent' : ''}`}>
+                      <article id={`message-${body.id}`} className={`browser-message ${highlight === body.id ? 'browser-message-highlight' : ''} ${continuation ? 'browser-message-continuation' : ''} ${forYou ? 'browser-message-for-you' : ''} ${isAgent(member) ? 'browser-message-agent' : ''}`}>
                         <MemberAvatar member={member} roomId={urlRoom} fallback={author} />
                         <div><header className={continuation ? 'sr-only' : ''}><strong>{author}</strong>{isAgent(member) && <span className="browser-role">agent</span>}{operator && <span className="browser-operator">for {operator}</span>}{body.memberId === status.memberId && <span className="browser-author-you">you</span>}<time dateTime={new Date(body.at).toISOString()}>{new Date(body.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
                           <button className="browser-reply-button" aria-label={`Reply to ${own ? 'your' : `${author}’s`} message`} title="Reply" onClick={() => startReply(body.id)}>Reply</button></header>
@@ -488,7 +529,7 @@ export function BrowserRooms() {
                 <p className="browser-connection" role="status"><span className={`browser-connection-dot ${connected.length ? 'is-connected' : ''}`} aria-hidden="true" />{connected.length ? `Connected to ${connected.length} other device${connected.length === 1 ? '' : 's'}` : status.devices!.length > 1 ? 'Waiting for another device to connect' : 'You’re the first one here'}</p>
               </div>
             </div>
-            {boardOpen && <TaskBoard room={boardRoom} viewerId={status.memberId} disabled={!admitted} onClose={() => setBoardOpen(false)} actions={boardActions} highlight={highlight} />}
+            {boardOpen && <TaskBoard room={boardRoom} viewerId={status.memberId} disabled={!admitted} onClose={() => setBoardOpen(false)} actions={boardActions} highlight={highlight} working={workingOn} />}
             <aside id="browser-room-details" className="browser-details" aria-label="Room details" hidden={!detailsOpen} onKeyDown={e => { if (e.key === 'Escape') closeDetails(); }}>
               <header className="browser-details-heading"><h2 tabIndex={-1} ref={detailsHeading}>Room details</h2><button className="browser-close" aria-label="Close room details" onClick={closeDetails}><RoomIcon kind="close" /></button></header>
               <section aria-label="People and agents in this room" className="browser-people"><h3>{agents.length ? 'People and agents' : 'People'} <span>{status.members!.length}</span></h3>
@@ -497,8 +538,11 @@ export function BrowserRooms() {
                   // The host may remove anyone but themselves; an operator may remove their own agents.
                   const removable = member.id !== status.memberId && (host ? member.id !== status.ownerId : isAgent(member) && member.operatorId === status.memberId);
                   const operatesIt = isAgent(member) && member.operatorId === status.memberId;
-                  return <div className="browser-person" key={member.id}><MemberAvatar member={member} roomId={urlRoom} fallback={member.name} /><div><strong>{member.name}{member.id === status.memberId ? ' (you)' : ''}</strong>
+                  const a = activities.get(member.id);
+                  return <div className="browser-person" key={member.id}><span className="browser-person-avatar"><MemberAvatar member={member} roomId={urlRoom} fallback={member.name} />{a && <span className={`agent-dot is-${a.state}${a.state !== 'offline' && a.state !== 'online' && a.quiet !== undefined ? ' is-quiet' : ''}`} aria-hidden="true" />}</span><div><strong>{member.name}{member.id === status.memberId ? ' (you)' : ''}</strong>
                     <span>{isAgent(member) ? `Agent · operated by ${operatorOf(member)}` : `${member.id === status.ownerId ? 'Host · ' : ''}${devices} device${devices === 1 ? '' : 's'}`}</span>
+                    {a && activityLine(a)}
+                    {a && a.state !== 'offline' && a.state !== 'online' && a.note && <span className="agent-activity-note">{a.note}</span>}
                     {removable && (confirming === member.id ? confirmRemove(member) : <button className="browser-remove" disabled={busy} aria-label={`Remove ${member.name} from the room`} onClick={() => setConfirming(member.id)}>{isAgent(member) ? 'Remove agent' : 'Remove'}</button>)}
                     {operatesIt && <button className="browser-text-link browser-picture-link" disabled={busy} onClick={() => pickAvatar(member.id)}>{member.avatar ? 'Change picture' : 'Set picture'}</button>}
                     {member.avatar && member.id !== status.memberId && (operatesIt || host) && <button className="browser-remove" disabled={busy} onClick={() => clearAvatar(member.id)}>Remove picture</button>}</div></div>;
