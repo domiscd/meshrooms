@@ -56,7 +56,9 @@ library.
 ./scripts/build-native.sh --verify-only --out <qualified-output-directory>
 ```
 
-Requires Linux x86_64 and Zig 0.16.0. The script checks both source commits,
+Requires Linux x86_64 and Zig 0.16.0. The script takes both source commits, the
+Zig version and the required symbols from
+[native/linux-x64.lock.json](../native/linux-x64.lock.json) only, checks them,
 exports tracked files into a fresh ignored scratch directory, builds only the
 FFI library, refuses an existing `libwormdb_ffi.so`, and writes
 `wormdb.linux-x64.provenance.json` next to the candidate. Point

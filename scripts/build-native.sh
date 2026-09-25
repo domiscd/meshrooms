@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Build libwormdb_ffi.so from the source pins in native/wormdb.lock.json.
+# Build libwormdb_ffi.so from the source pins in native/linux-x64.lock.json.
 # Linux x86_64. Uses -Dcrypto-backend=std so the library matches the Windows
 # pin's crypto choice and does not link libsodium.
 set -euo pipefail
 
 repository="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-lock_file="$repository/native/wormdb.lock.json"
+# The reviewed Linux lock is the only source of build inputs here; the Windows
+# pin in native/wormdb.lock.json is never read, so it cannot change this build.
 linux_lock_file="$repository/native/linux-x64.lock.json"
+lock_file="$linux_lock_file"
 
 source_dir="${WORMDB_SRC:-}"
 out_dir=""
@@ -35,6 +37,9 @@ read_lock() {
   python3 - "$lock_file" <<'PY'
 import json, sys
 lock = json.load(open(sys.argv[1]))
+toolchain = lock["toolchain"]
+if toolchain.get("target") != "x86_64-linux" or toolchain.get("cryptoBackend") != "std":
+    raise SystemExit("native/linux-x64.lock.json must describe an x86_64-linux build with the std crypto backend.")
 print(lock["candidateCommit"])
 print(lock["meshguardCommit"])
 print(lock["toolchain"]["version"])
