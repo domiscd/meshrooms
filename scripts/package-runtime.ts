@@ -147,6 +147,9 @@ export async function packageRuntime(options: PackageOptions): Promise<PackageRe
   }
   const setupTs = join(sourceDir, 'src', 'setup.ts');
   if (!existsSync(setupTs)) throw new Error('Required type file missing: src/setup.ts');
+  // Shared room logic imported at runtime by server/node.ts and server/cli.ts.
+  const collabTs = join(sourceDir, 'src', 'collab.ts');
+  if (!existsSync(collabTs)) throw new Error('Required shared file missing: src/collab.ts');
   const skillPath = join(sourceDir, 'skills', 'meshrooms', 'SKILL.md');
   if (!existsSync(skillPath)) throw new Error('Required skill missing: skills/meshrooms/SKILL.md');
   const metadata = JSON.parse(readFileSync(join(sourceDir, 'package.json'), 'utf8'));
@@ -204,6 +207,8 @@ export async function packageRuntime(options: PackageOptions): Promise<PackageRe
   mkdirSync(destSrcDir, { recursive: true });
   copyFileSync(roomTs, join(destSrcDir, 'room.ts'));
   relativeFiles.push('src/room.ts');
+  copyFileSync(collabTs, join(destSrcDir, 'collab.ts'));
+  relativeFiles.push('src/collab.ts');
 
   if (existsSync(setupTs)) {
     copyFileSync(setupTs, join(destSrcDir, 'setup.ts'));

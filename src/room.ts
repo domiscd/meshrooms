@@ -1,5 +1,9 @@
+import type { Floor, Task } from './collab';
+
 export type Role = 'human' | 'agent';
 export type Share = { title: string; text: string };
+/** Uploaded file metadata. `type` is sniffed from the bytes; only `image` kinds render inline. */
+export type Attachment = { id: string; name: string; type: string; kind: 'image' | 'file'; size: number; width?: number; height?: number };
 export type Participant = {
   id: string;
   name: string;
@@ -19,9 +23,17 @@ export type Message = {
   sample?: boolean;
   replyTo?: string;
   share?: Share;
+  attachments?: Attachment[];
+  /** Participant IDs addressed with @Name, derived from the text by the node. */
+  mentions?: string[];
 };
 export type RoomInfo = { id: string; title: string; project: string; sample: boolean };
-export type RoomSnapshot = RoomInfo & { messages: Message[]; participants: Participant[]; paired?: boolean };
+export type RoomSnapshot = RoomInfo & {
+  messages: Message[]; participants: Participant[]; paired?: boolean;
+  /** Absent on backends without agent floor control or a task board (the demo node). */
+  floor?: Floor; tasks?: Task[]; boardRevision?: number;
+};
+export type TaskDraft = { title?: string; notes?: string; status?: Task['status']; assigneeId?: string | null };
 export type NodeSnapshot = {
   backend: 'demo' | 'local';
   storage: 'memory' | 'wormdb';
@@ -30,7 +42,7 @@ export type NodeSnapshot = {
   rooms: RoomSnapshot[];
   availableRooms: RoomInfo[];
 };
-export type Draft = { text: string; replyTo?: string; share?: Share };
+export type Draft = { text: string; replyTo?: string; share?: Share; attachments?: string[] };
 export type Connection = 'connecting' | 'local' | 'disconnected';
 
 /** One browser view subscribes to the node; selecting a room changes no membership. */
@@ -39,4 +51,10 @@ export interface RoomTransport {
   send(roomId: string, draft: Draft): Promise<void>;
   createRoom(input: { title: string; project: string }): Promise<string>;
   joinRoom(roomId: string): Promise<string>;
+  setFloor(roomId: string, floor: Floor): Promise<void>;
+  /** Upload before sending; retry with the same requestId after an uncertain result. */
+  upload(roomId: string, file: Blob, name: string, requestId: string): Promise<Attachment>;
+  createTask(roomId: string, task: TaskDraft & { title: string }): Promise<void>;
+  updateTask(roomId: string, taskId: string, revision: number, changes: TaskDraft): Promise<void>;
+  removeTask(roomId: string, taskId: string, revision: number): Promise<void>;
 }

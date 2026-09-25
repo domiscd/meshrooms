@@ -1,4 +1,4 @@
-import type { RoomTransport } from './room';
+import type { Attachment, RoomTransport } from './room';
 import type { SetupCommand, SetupStatus } from './setup';
 
 export const sessionRequiredEvent = 'meshrooms:session-required';
@@ -10,7 +10,7 @@ function requireSession() {
   return new SessionRequiredError();
 }
 
-type CommandResult = { roomId?: string; messageId?: string; status?: string };
+type CommandResult = { roomId?: string; messageId?: string; status?: string; taskId?: string; revision?: number };
 function createCommandPoster(prefix: string, demo = false) {
   const uncertainCommands = new Map<string, string>();
   const retryNote = demo ? 'Check the room before trying again.' : 'Try the same action again to safely retry.';
@@ -41,6 +41,8 @@ function createCommandPoster(prefix: string, demo = false) {
       ? !!result && typeof result === 'object' && !Array.isArray(result) && (body.intentId !== undefined ? typeof result.roomId === 'string' && result.roomId.length > 0 : result.roomId === undefined || typeof result.roomId === 'string' && result.roomId.length > 0)
       : path === 'messages'
       ? demo ? result?.status === 'in-local-memory' : result?.status === 'stored-locally' && typeof result?.messageId === 'string'
+      : path.startsWith('tasks')
+      ? typeof result?.taskId === 'string' && Number.isInteger(result?.revision)
       : typeof result?.roomId === 'string' && result.roomId.length > 0;
     if (!confirmed) throw new Error(`Could not confirm the result. ${retryNote}`);
     uncertainCommands.delete(key);
@@ -102,8 +104,26 @@ export function createRoomTransport(demo = false): RoomTransport {
       };
       return () => { closed = true; source.close(); };
     },
-    async send(roomId, draft) { await post('messages', { roomId, text: draft.text, replyTo: draft.replyTo, share: draft.share ? { title: draft.share.title, text: draft.share.text } : undefined }); },
+    async send(roomId, draft) { await post('messages', { roomId, text: draft.text, replyTo: draft.replyTo, share: draft.share ? { title: draft.share.title, text: draft.share.text } : undefined, attachments: draft.attachments?.length ? draft.attachments : undefined }); },
+    async upload(roomId, file, name, requestId): Promise<Attachment> {
+      if (demo) throw new Error('The demo node does not store attachments.');
+      const query = new URLSearchParams({ roomId, requestId, name });
+      let response: Response;
+      try {
+        response = await fetch(`${prefix}/attachments?${query}`, { method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file, signal: AbortSignal.timeout(60000) });
+      } catch { throw new Error('Could not confirm the upload. Retry to upload it safely.'); }
+      if (response.status === 401) throw requireSession();
+      const result = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(result?.message || 'The local node rejected this file.');
+      if (typeof result?.id !== 'string' || typeof result?.name !== 'string' || !['image', 'file'].includes(result?.kind)) throw new Error('Could not confirm the upload. Retry to upload it safely.');
+      return result;
+    },
     async createRoom(input) { return (await post('rooms', { title: input.title, project: input.project })).roomId!; },
     async joinRoom(roomId) { return (await post('rooms/join', { roomId })).roomId!; },
+    async setFloor(roomId, floor) { await post('rooms/floor', { roomId, floor }); },
+    async createTask(roomId, task) { await post('tasks', { roomId, title: task.title, notes: task.notes, assigneeId: task.assigneeId }); },
+    async updateTask(roomId, taskId, revision, changes) { await post('tasks/update', { roomId, taskId, revision, ...changes }); },
+    async removeTask(roomId, taskId, revision) { await post('tasks/remove', { roomId, taskId, revision }); },
   };
 }

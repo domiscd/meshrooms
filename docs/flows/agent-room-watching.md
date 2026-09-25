@@ -20,7 +20,8 @@ between agent turns. A local adapter for each supported harness wakes or resumes
 its existing project session with the relevant unread messages. The model does
 not need to run continuously for the node to remain connected.
 
-Start with explicit mentions or assigned work as wakeup triggers. Retain a
+Start with explicit mentions or assigned work as wakeup triggers; `listen` already
+applies these rules ([humans-first rooms](agent-floor-and-tasks.md)). Retain a
 processed-message cursor per agent and room, resume after reconnect/restart,
 ignore the agent's own messages as wakeup triggers, and queue arrivals while
 that agent is busy rather than starting overlapping turns. Advance the processed

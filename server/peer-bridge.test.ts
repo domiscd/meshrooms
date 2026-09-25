@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { LocalNode } from './node';
 import { PeerBridge, packets } from './peer-bridge';
 import { CATALOG, fingerprint, tokenHash } from './model';
-import type { IncomingPacket, PeerTransport } from './meshguard';
+import type { FileState, FileTransport, IncomingFile, IncomingPacket, PeerTransport } from './meshguard';
 
 const nodes: LocalNode[] = [], bridges: PeerBridge[] = [];
 afterEach(() => { for (const b of bridges.splice(0)) b.close(); for (const n of nodes.splice(0)) n.close(); });
@@ -24,19 +24,38 @@ function fixture() {
   const descriptorA = a.descriptor(room, keyA), descriptorB = b.descriptor(room, keyB);
   a.pairRoom(descriptorB, keyA); b.pairRoom(descriptorA, keyB);
   const inboxA: IncomingPacket[] = [], inboxB: IncomingPacket[] = [];
-  const state = { dropAcks: false, available: true };
-  const makeWire = (sender: string, own: IncomingPacket[], remote: IncomingPacket[]): PeerTransport => ({
+  const state = { dropAcks: false, available: true, failFiles: false, files: true };
+  const filesA: IncomingFile[] = [], filesB: IncomingFile[] = [], offered: string[] = [];
+  // In-memory verified transfers: an offer lands whole in the peer's MeshGuard inbox.
+  const makeFiles = (sender: string, own: IncomingFile[], remote: IncomingFile[]): FileTransport => {
+    const statuses = new Map<string, FileState>();
+    return {
+      async offerFile(_peer, bytes, sha256, meta) {
+        const id = randomUUID().replaceAll('-', ''); offered.push(sender);
+        if (state.failFiles) statuses.set(id, { state: 'failed', error: 'receiver did not respond' });
+        else { remote.push({ id, sender, sha256, meta, bytes }); statuses.set(id, { state: 'delivered' }); }
+        return id;
+      },
+      async fileStatus(id) { return statuses.get(id) ?? null; },
+      async nextFile() { return own.shift() ?? null; },
+      async releaseFile(id) { statuses.delete(id); },
+    };
+  };
+  const makeWire = (sender: string, own: IncomingPacket[], remote: IncomingPacket[], files: FileTransport): PeerTransport => ({
     async check() { if (!state.available) throw new Error('offline'); },
     async receive() { return own.shift() ?? null; },
     async send(_peer, data) { if (!state.dropAcks || JSON.parse(data).k !== 'ack') remote.push({ sender, data }); },
+    get files() { return state.files ? files : undefined; },
   });
-  const wireA = makeWire(keyA, inboxA, inboxB), wireB = makeWire(keyB, inboxB, inboxA);
+  const wireA = makeWire(keyA, inboxA, inboxB, makeFiles(keyA, filesA, filesB)), wireB = makeWire(keyB, inboxB, inboxA, makeFiles(keyB, filesB, filesA));
   const bridgeA = new PeerBridge(a, wireA), bridgeB = new PeerBridge(b, wireB); bridges.push(bridgeA, bridgeB);
-  return { a, b, dbA, dbB, room, keyA, keyB, wireA, wireB, bridgeA, bridgeB, inboxA, inboxB, state };
+  return { a, b, dbA, dbB, room, keyA, keyB, wireA, wireB, bridgeA, bridgeB, inboxA, inboxB, filesA, filesB, offered, state };
 }
 
 test('two admitted agents exchange fragmented unicode, while other rooms and author spoofing stay excluded', async () => {
   const f = fixture(), secretRoom = f.a.createRoom({ title: 'Private', requestId: randomUUID() }).roomId;
+  // Agents open this exchange themselves, which requires an open floor on each node.
+  for (const n of [f.a, f.b]) n.setFloor({ roomId: f.room, requestId: randomUUID(), floor: 'open' });
   f.a.send({ roomId: secretRoom, requestId: randomUUID(), text: 'Never shared' });
   const text = 'café 🚀'.repeat(300);
   const sent = f.a.send({ roomId: f.room, requestId: randomUUID(), text }, f.a.authenticateAgent('Codex'.repeat(16))!);
@@ -239,4 +258,81 @@ test('assembly global backstop remains bounded and acknowledgments bypass a full
   expect(f.b.pendingDelivery().find(r => r.roomId === f.room)!.acknowledged).toContain(sent.messageId);
   for (const data of frames) await f.bridgeB.ingest(chunk(last.key, data), 30001);
   expect(f.b.snapshot().rooms.find(r => r.id === last.room)!.messages).toHaveLength(1);
+});
+
+function png(width: number, height: number, seed = 0) {
+  const bytes = new Uint8Array(64); bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  new DataView(bytes.buffer).setUint32(16, width); new DataView(bytes.buffer).setUint32(20, height); bytes[63] = seed; return bytes;
+}
+async function exchange(f: ReturnType<typeof fixture>, rounds = 4) {
+  for (let i = 0; i < rounds; i++) { await f.bridgeA.pump(10000 + i); await f.bridgeB.pump(10000 + i); }
+}
+
+test('a screenshot reaches the paired machine before the message that shows it', async () => {
+  const f = fixture();
+  const shot = f.a.upload({ roomId: f.room, requestId: randomUUID(), name: 'overlap.png', bytes: png(1440, 900) });
+  const sent = f.a.send({ roomId: f.room, requestId: randomUUID(), text: '@Grok header overlaps at 390px', attachments: [shot.id] });
+  await f.bridgeA.pump(1);
+  // The message waits for the file; nothing but the transfer has left node A.
+  expect(f.inboxB).toHaveLength(0); expect(f.filesB).toHaveLength(1);
+  expect(f.bridgeA.status().rooms[0]).toMatchObject({ pending: [sent.messageId], sendingFiles: [shot.id], filesStoredRemotely: [] });
+  await exchange(f);
+  const remote = f.b.snapshot().rooms[0].messages;
+  expect(remote.map(m => [m.text, m.attachments])).toEqual([['@Grok header overlaps at 390px', [shot]]]);
+  expect(f.b.attachment(f.room, shot.id).bytes).toEqual(png(1440, 900));
+  expect(f.a.pendingDelivery()[0]).toMatchObject({ messages: [], acknowledged: [sent.messageId], files: [shot.id] });
+  expect(f.bridgeA.status().rooms[0].sendingFiles).toEqual([]);
+  // The reply path works the same way in the other direction.
+  const reply = f.b.upload({ roomId: f.room, requestId: randomUUID(), name: 'fixed.png', bytes: png(1440, 900, 1) }, f.b.authenticateAgent('Grok'.repeat(16))!);
+  f.b.send({ roomId: f.room, requestId: randomUUID(), text: 'Fixed', replyTo: sent.messageId, attachments: [reply.id] }, f.b.authenticateAgent('Grok'.repeat(16))!);
+  await exchange(f);
+  expect(f.a.snapshot().rooms[0].messages.at(-1)?.attachments).toEqual([reply]);
+  expect(f.a.attachment(f.room, reply.id).bytes).toEqual(png(1440, 900, 1));
+});
+
+test('failed transfers are retried and a delivered file is never sent twice', async () => {
+  const f = fixture(); f.state.failFiles = true;
+  const shot = f.a.upload({ roomId: f.room, requestId: randomUUID(), bytes: png(10, 10) });
+  f.a.send({ roomId: f.room, requestId: randomUUID(), attachments: [shot.id] });
+  await f.bridgeA.pump(1); await f.bridgeA.pump(2);
+  expect(f.bridgeA.status().error).toContain('receiver did not respond');
+  expect(f.b.snapshot().rooms[0].messages).toHaveLength(0);
+  f.state.failFiles = false;
+  // The retry waits out its backoff, then succeeds.
+  await Bun.sleep(5100);
+  await exchange(f);
+  expect(f.b.snapshot().rooms[0].messages).toHaveLength(1);
+  const offers = f.offered.length;
+  await exchange(f); expect(f.offered).toHaveLength(offers);
+}, 15000);
+
+test('files from unadmitted senders or forged metadata are dropped without a receipt', async () => {
+  const f = fixture();
+  const bytes = png(8, 8), sha256 = createHash('sha256').update(bytes).digest('hex');
+  const meta = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+  const agentB = f.b.snapshot(f.b.authenticateAgent('Grok'.repeat(16))!).localParticipantId;
+  await f.bridgeA.ingestFile({ id: 'a'.repeat(32), sender: 'c'.repeat(64), sha256, bytes, meta: meta({ v: 1, r: f.room, a: agentB, i: randomUUID(), n: 'x.png' }) });
+  await f.bridgeA.ingestFile({ id: 'b'.repeat(32), sender: f.keyB, sha256, bytes, meta: meta({ v: 1, r: f.room, a: f.a.owner.participantId, i: randomUUID(), n: 'x.png' }) });
+  await f.bridgeA.ingestFile({ id: 'c'.repeat(32), sender: f.keyB, sha256: 'f'.repeat(64), bytes, meta: meta({ v: 1, r: f.room, a: agentB, i: randomUUID(), n: 'x.png' }) });
+  expect(f.inboxB).toHaveLength(0);
+  // A message naming an attachment that never arrived is refused, so no receipt is sent for it.
+  const shot = f.b.upload({ roomId: f.room, requestId: randomUUID(), bytes }, f.b.authenticateAgent('Grok'.repeat(16))!);
+  f.b.setFloor({ roomId: f.room, requestId: randomUUID(), floor: 'open' });
+  f.b.send({ roomId: f.room, requestId: randomUUID(), attachments: [shot.id] }, f.b.authenticateAgent('Grok'.repeat(16))!);
+  const message = f.b.pendingDelivery()[0].messages[0];
+  expect(() => f.a.receivePeer(f.room, f.keyB, message)).toThrow('has not arrived');
+  // A forged file claiming the same ID but different bytes is rejected once the real one is stored.
+  await exchange(f);
+  expect(f.a.snapshot().rooms[0].messages.at(-1)?.attachments?.[0].id).toBe(shot.id);
+  const other = png(8, 8, 9);
+  expect(() => f.a.receivePeerFile(f.room, f.keyB, { authorId: agentB, id: shot.id, name: 'x.png', hash: createHash('sha256').update(other).digest('hex') }, other)).toThrow('different file');
+});
+
+test('without MeshGuard transfers, messages with attachments wait and say why', async () => {
+  const f = fixture(); f.state.files = false;
+  const shot = f.a.upload({ roomId: f.room, requestId: randomUUID(), bytes: png(4, 4) });
+  f.a.send({ roomId: f.room, requestId: randomUUID(), text: 'With file', attachments: [shot.id] });
+  await f.bridgeA.pump(1);
+  expect(f.bridgeA.status().error).toContain('cannot transfer files');
+  expect(f.inboxB).toHaveLength(0);
 });

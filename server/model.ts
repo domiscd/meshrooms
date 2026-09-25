@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import type { Message, Participant, RoomInfo } from '../src/room';
+import type { Attachment, Message, Participant, RoomInfo } from '../src/room';
 import type { PendingRoom } from '../src/setup';
+import { FLOORS, TASK_STATUSES, type Floor, type Task } from '../src/collab';
 
 export const CATALOG_V1 = 'meshrooms/v1/catalog';
 export const CATALOG = 'meshrooms/v2/catalog';
@@ -12,8 +13,20 @@ export const isHash = (value: unknown): value is string => typeof value === 'str
 export const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 export const historyKey = (roomId: string) => `meshrooms/v1/rooms/${roomId}/history`;
-export type RoomPeer = { key: string; participantIds: string[]; excluded: string[]; acknowledged: string[] };
-export type RoomRecord = RoomInfo & { participantIds: string[]; requestId: string; fingerprint: string; peer?: RoomPeer };
+export const boardKey = (roomId: string) => `meshrooms/v1/rooms/${roomId}/board`;
+export const attachmentsKey = (roomId: string) => `meshrooms/v1/rooms/${roomId}/attachments`;
+export const MAX_TASKS = 200;
+export const MAX_BOARD_RECEIPTS = 256;
+/** `files`: attachment IDs the paired node confirmed it stored (absent before attachment delivery existed). */
+export type RoomPeer = { key: string; participantIds: string[]; excluded: string[]; acknowledged: string[]; files?: string[] };
+/** `floor` is absent on rooms created before floor control; they read as humans-first. */
+export type RoomRecord = RoomInfo & { participantIds: string[]; requestId: string; fingerprint: string; peer?: RoomPeer; floor?: Floor };
+/** Board receipts make retried task commands idempotent per author and request ID. */
+export type BoardReceipt = { id: string; actorId: string; fingerprint: string; taskId: string; revision: number };
+export type Board = { version: 1; roomId: string; revision: number; tasks: Task[]; receipts: BoardReceipt[] };
+/** An upload. It is pending until a message in the same room references it; bytes live in the blob store by hash. */
+export type AttachmentRecord = Attachment & { hash: string; uploadedBy: string; uploadedAt: string; requestId: string; fingerprint: string };
+export type AttachmentIndex = { version: 1; roomId: string; files: AttachmentRecord[] };
 export type IntentRecord = PendingRoom & { agentId: string; tokenHash: string; fingerprint: string };
 export type Settings = { completed: boolean; machineName: string; startAtLogin: boolean };
 export type Catalog = {
@@ -44,13 +57,15 @@ export function validCatalog(value: any): value is Catalog {
     || value.participants.filter((p: Participant) => p.role === 'human' && p.state === 'local').length !== 1) return false;
   if (!value.rooms.every((r: any) => r && isUuid(r.id) && isUuid(r.requestId) && isHash(r.fingerprint)
     && named(r.title, 64) && typeof r.project === 'string' && r.project.length <= 48 && r.sample === false
+    && (r.floor === undefined || FLOORS.includes(r.floor))
     && Array.isArray(r.participantIds) && unique(r.participantIds) && r.participantIds.includes(value.ownerId)
     && r.participantIds.every((id: string) => people.has(id))
     && (r.peer === undefined ? r.participantIds.every((id: string) => people.get(id)?.state === 'local')
       : isHash(r.peer.key) && Array.isArray(r.peer.participantIds) && r.peer.participantIds.length > 0 && r.peer.participantIds.length <= 16
         && unique(r.peer.participantIds) && r.peer.participantIds.every((id: string) => r.participantIds.includes(id) && people.get(id)?.peerKey === r.peer.key)
         && r.participantIds.every((id: string) => people.get(id)?.state === 'local' || r.peer.participantIds.includes(id))
-        && [r.peer.excluded, r.peer.acknowledged].every(ids => Array.isArray(ids) && ids.length <= MAX_MESSAGES && unique(ids) && ids.every(isUuid))))) return false;
+        && [r.peer.excluded, r.peer.acknowledged].every(ids => Array.isArray(ids) && ids.length <= MAX_MESSAGES && unique(ids) && ids.every(isUuid))
+        && (r.peer.files === undefined || (Array.isArray(r.peer.files) && r.peer.files.length <= 512 && unique(r.peer.files) && r.peer.files.every(isUuid)))))) return false;
   if (!value.intents.every((i: any) => i && isUuid(i.id) && isUuid(i.agentId) && isHash(i.tokenHash) && isHash(i.fingerprint)
     && named(i.title, 64) && named(i.agentName, 64) && typeof i.project === 'string' && i.project.length <= 48
     && (i.status === 'pending' ? i.roomId === undefined && !people.has(i.agentId)
@@ -84,7 +99,7 @@ export function migrateV2(value: any): Catalog {
 
 export function validHistory(value: any, room: RoomRecord, people: Participant[]): value is History {
   if (!value || ![1, 2].includes(value.version) || value.roomId !== room.id || !Array.isArray(value.messages) || value.messages.length > MAX_MESSAGES) return false;
-  const ids = new Set<string>(); const requests = new Set<string>();
+  const ids = new Set<string>(); const requests = new Set<string>(); const attached = new Set<string>();
   return value.messages.every((m: any) => {
     const author = people.find(p => p.id === m?.authorId && room.participantIds.includes(p.id));
     if (!m || !author || !isUuid(m.id) || ids.has(m.id) || !isUuid(m.requestId) || requests.has(`${m.authorId}:${m.requestId}`)
@@ -92,9 +107,37 @@ export function validHistory(value: any, room: RoomRecord, people: Participant[]
       || typeof m.text !== 'string' || m.text.length > 4000 || typeof m.time !== 'string' || !Number.isFinite(Date.parse(m.time))
       || !isHash(m.fingerprint) || m.sample === true || (m.replyTo !== undefined && !ids.has(m.replyTo))) return false;
     if (m.share !== undefined && (!m.share || !named(m.share.title, 100) || !named(m.share.text, 8000))) return false;
-    if (!m.text.trim() && !m.share) return false;
+    if (m.attachments !== undefined && (!Array.isArray(m.attachments) || !m.attachments.length || m.attachments.length > 4
+      || !m.attachments.every((a: any) => validAttachment(a) && !attached.has(a.id) && !!attached.add(a.id)))) return false;
+    if (!m.text.trim() && !m.share && !m.attachments) return false;
     ids.add(m.id); requests.add(`${m.authorId}:${m.requestId}`); return true;
   });
+}
+
+export function validAttachment(a: any): a is Attachment {
+  return !!a && isUuid(a.id) && named(a.name, 120) && typeof a.type === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(a.type)
+    && ['image', 'file'].includes(a.kind) && Number.isSafeInteger(a.size) && a.size > 0
+    && [a.width, a.height].every(n => n === undefined || (Number.isSafeInteger(n) && n > 0 && n <= 65535));
+}
+
+export function validAttachmentIndex(value: any, room: RoomRecord): value is AttachmentIndex {
+  if (!value || value.version !== 1 || value.roomId !== room.id || !Array.isArray(value.files) || !unique(value.files.map((f: any) => f?.id))) return false;
+  return value.files.every((f: any) => isHash(f?.hash) && room.participantIds.includes(f.uploadedBy)
+    && typeof f.uploadedAt === 'string' && Number.isFinite(Date.parse(f.uploadedAt)) && isUuid(f.requestId) && isHash(f.fingerprint) && validAttachment(f));
+}
+
+export function validBoard(value: any, room: RoomRecord, people: Participant[]): value is Board {
+  if (!value || value.version !== 1 || value.roomId !== room.id || !Number.isSafeInteger(value.revision) || value.revision < 0
+    || !Array.isArray(value.tasks) || value.tasks.length > MAX_TASKS || !unique(value.tasks.map((t: Task) => t?.id))
+    || !Array.isArray(value.receipts) || value.receipts.length > MAX_BOARD_RECEIPTS) return false;
+  const member = (id: unknown) => typeof id === 'string' && room.participantIds.includes(id) && people.some(p => p.id === id);
+  return value.tasks.every((t: any) => t && isUuid(t.id) && named(t.title, 120) && typeof t.notes === 'string' && t.notes.length <= 2000
+    && TASK_STATUSES.includes(t.status) && member(t.createdBy) && member(t.updatedBy)
+    && typeof t.updatedAt === 'string' && Number.isFinite(Date.parse(t.updatedAt))
+    && Number.isSafeInteger(t.revision) && t.revision >= 1
+    && (t.assigneeId === undefined ? t.assignedBy === undefined && t.assignedRevision === undefined
+      : member(t.assigneeId) && member(t.assignedBy) && Number.isSafeInteger(t.assignedRevision) && t.assignedRevision >= 1 && t.assignedRevision <= value.revision))
+    && value.receipts.every((r: any) => r && isUuid(r.id) && member(r.actorId) && isHash(r.fingerprint) && isUuid(r.taskId) && Number.isSafeInteger(r.revision));
 }
 
 export function recover<T>(raw: string, name: string, valid: (value: any) => boolean): T {
