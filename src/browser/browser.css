@@ -99,3 +99,5 @@
 .browser-rail-collapsed .browser-self{padding-inline:0;justify-content:center}
 }
 @media(max-width:760px){.browser-rail-toggle{display:none}.browser-rail-top{display:contents}}
+/* Scroll panes contain their visually hidden (absolute) labels, so they scroll with the pane instead of stretching the page. */
+.browser-joined,.browser-room-nav,.browser-requests,.browser-transcript,.browser-details{position:relative}
