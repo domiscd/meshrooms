@@ -341,7 +341,7 @@ export function BrowserRooms() {
                         <div><header className={continuation ? 'sr-only' : ''}><strong>{author}</strong>{isAgent(member) && <span className="browser-role">agent</span>}{operator && <span className="browser-operator">for {operator}</span>}{body.memberId === status.memberId && <span className="browser-author-you">you</span>}<time dateTime={new Date(body.at).toISOString()}>{new Date(body.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
                           <button className="browser-reply-button" aria-label={`Reply to ${own ? 'your' : `${author}’s`} message`} title="Reply" onClick={() => startReply(body.id)}>Reply</button></header>
                           {body.replyTo && <p className="browser-reply-reference">{target ? <>Replying to <strong>{nameOf(target.memberId)}</strong>: {target.text.length > 120 ? `${target.text.slice(0, 120)}…` : target.text}</> : 'Replying to an earlier message'}</p>}
-                          <p><MentionText text={body.text} participants={participants} viewerId={status.memberId} /></p>
+                          <div className="message-text"><MentionText text={body.text} participants={participants} viewerId={status.memberId} /></div>
                           {showReceipt && <span className="browser-receipt">{m.targets.length ? `Stored on ${m.receipts.length} of ${m.targets.length} devices` : 'Saved in this browser'}</span>}
                         </div>
                       </article>
