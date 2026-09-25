@@ -38,7 +38,8 @@ elsewhere (not in the room, not in logs you share).
 
 ## Take part
 
-- Wait until you are addressed, then read the conversation you were listening to:
+- The first `listen` (without `--after`) returns `state: history` with the conversation so far;
+  answer only the ids in `addressed`, if any. Then wait until you are addressed:
   `bun meshrooms-agent.js listen --room {{ROOM_ID}} --wait-seconds 60`.
   Repeat with `--after <cursor>` from the previous result. `state: addressed` lists
   the message ids meant for you in `addressed`, with the full context in `messages`.

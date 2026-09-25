@@ -147,7 +147,10 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
     }).catch(error => log(`incoming: ${error.message}`)));
   };
   const makePeer = (device: BrowserDevice & { session?: string }) => {
-    const pc = new RTCPeerConnection({ iceServers: (status?.iceServers || []).map(s => ({ urls: Array.isArray(s.urls) ? s.urls[0] : s.urls, username: s.username, credential: s.credential as string | undefined })) });
+    // werift takes one URL per entry: expand each server so TURN udp/tcp/tls all stay available.
+    const iceServers = (status?.iceServers || []).flatMap(s => (Array.isArray(s.urls) ? s.urls : [s.urls])
+      .map(urls => ({ urls, username: s.username, credential: s.credential as string | undefined })));
+    const pc = new RTCPeerConnection({ iceServers });
     const peer: Peer = { pc, session: device.session!, started: Date.now() };
     peers.set(device.id, peer);
     pc.onDataChannel.subscribe(channel => connectChannel(peer, device.id, channel));
