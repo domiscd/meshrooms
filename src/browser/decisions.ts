@@ -54,6 +54,7 @@ export type Decision = {
 export const MAX_DECISION_OPS = 4000;
 /** Operations one member may add to a room's decisions, so nobody can fill the shared cap alone. */
 export const MAX_MEMBER_DECISION_OPS = 400;
+export const COMPACT_DECISIONS_AT = 2000;
 export const MAX_OPTIONS = 8;
 export const PLAN_REVIEW_OPTIONS: Omit<DecisionOption, 'addedBy'>[] = [
   { id: 'approve', label: 'Approve' }, { id: 'changes', label: 'Request changes' }, { id: 'reject', label: 'Reject' }];
@@ -250,3 +251,61 @@ export function decisionWakes(ops: (DecisionBody | VoteBody)[], room: RoomMember
   const resolved = decisions.filter(d => d.state !== 'open' && d.createdBy === agentId && fresh.some(o => mine(o, d) && (o as DecisionBody).state !== 'open'));
   return { asked, resolved };
 }
+
+/**
+ * Drops operations no longer needed to fold the same decisions, keeping a busy room well under MAX_DECISION_OPS.
+ * For decisions, it retains the valid chain of revisions leading to the current state.
+ * For votes, it retains the latest revision per member, plus any pinned votes required to verify closed decisions.
+ * Superseded vote revisions and unreferenced operations are pruned without modifying any signed packet.
+ */
+export function compactDecisions<T extends { body: DecisionBody | VoteBody }>(packets: T[], room?: RoomMembers): T[] {
+  const keep = new Set<string>();
+  const chains = new Map<string, DecisionBody[]>();
+  const votes = new Map<string, Map<string, VoteBody>>();
+  const heldVotes = new Map<string, VoteBody>();
+
+  for (const pkt of packets) {
+    const op = pkt.body;
+    const key = `${op.createdBy}:${op.decisionId}`;
+    if (op.kind === 'decision') {
+      chains.set(key, [...(chains.get(key) || []), op]);
+    } else {
+      heldVotes.set(op.id, op);
+      const decVotes = votes.get(key) || new Map<string, VoteBody>();
+      const existing = decVotes.get(op.memberId);
+      if (!existing || order(existing, op) < 0) {
+        decVotes.set(op.memberId, op);
+      }
+      votes.set(key, decVotes);
+    }
+  }
+
+  for (const [key, chain] of chains) {
+    chain.sort(order);
+    const first = chain[0];
+    if (first.revision !== 1 || first.state !== 'open' || first.memberId !== first.createdBy) continue;
+    keep.add(first.id);
+
+    let current = first;
+    for (const op of chain.slice(1)) {
+      if (room ? extends_(current, op, room, heldVotes) : (op.revision === current.revision + 1 && current.state === 'open')) {
+        current = op;
+        keep.add(op.id);
+      }
+    }
+
+    if (current.counted) {
+      for (const c of current.counted) keep.add(c.vote);
+    }
+
+    const decVotes = votes.get(key);
+    if (decVotes) {
+      for (const winningVote of decVotes.values()) {
+        keep.add(winningVote.id);
+      }
+    }
+  }
+
+  return packets.filter(p => keep.has(p.body.id));
+}
+

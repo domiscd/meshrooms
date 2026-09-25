@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
-import { admissible, castVote, decisionChunks, decisionWakes, due, foldDecisions, nextVoteRevision, openDecision, reviseDecision, tallyVotes, validDecisionBody, validVoteBody,
-  type DecisionBody, type RoomMembers, type VoteBody } from '../../src/browser/decisions';
+import { COMPACT_DECISIONS_AT, admissible, castVote, compactDecisions, decisionChunks, decisionWakes, due, foldDecisions, nextVoteRevision, openDecision, reviseDecision, tallyVotes, validDecisionBody, validVoteBody,
+  type DecisionBody, type DecisionPacket, type RoomMembers, type VoteBody } from '../../src/browser/decisions';
 
 const roomId = crypto.randomUUID(), deviceId = 'a'.repeat(64);
 const [igor, dom, sam, vesper, gemini] = Array.from({ length: 5 }, () => crypto.randomUUID());
@@ -155,3 +155,122 @@ test('stewardship stays with the creator after someone else adds an option', () 
   expect(fold([...domOps, retitled])[0].question).toBe('Ship today?');
   expect(fold([...domOps, reviseDecision(as(sam), fold(domOps)[0], { withdraw: true })])[0].state).toBe('withdrawn');
 });
+
+test('compaction preserves verified outcomes, drops superseded vote revisions, and shrinks the ops set', () => {
+  const open = openDecision({ ...as(igor), question: 'Choose DB', options: ['A', 'B'] });
+  let d = fold([open])[0];
+  // Igor votes o1, then updates to o2 (rev 2).
+  const v1 = castVote(as(igor), d, 'o1', '', 1);
+  const v2 = castVote(as(igor), d, 'o2', '', 2);
+  // Dom votes o2 (rev 1).
+  const vDom = castVote(as(dom), d, 'o2', '', 1);
+  const ops = [open, v1, v2, vDom];
+  d = fold(ops)[0];
+  const closed = reviseDecision(as(igor), d, { close: true });
+  const allOps = [...ops, closed];
+
+  const packets: DecisionPacket[] = allOps.map((body, i) => ({ body, signature: `sig-${i}` }));
+  const compacted = compactDecisions(packets, room);
+
+  // Igor's superseded v1 vote was dropped because v2 was counted; v2 and vDom are kept because they are pinned in counted.
+  expect(compacted.length).toBeLessThan(packets.length);
+  const keptIds = new Set(compacted.map(p => p.body.id));
+  expect(keptIds.has(v1.id)).toBe(false);
+  expect(keptIds.has(v2.id)).toBe(true);
+  expect(keptIds.has(vDom.id)).toBe(true);
+  expect(keptIds.has(open.id)).toBe(true);
+  expect(keptIds.has(closed.id)).toBe(true);
+
+  // Compacting produces the exact same folded outcome and verified state.
+  const beforeFold = foldDecisions(allOps, room)[0];
+  const afterFold = foldDecisions(compacted.map(p => p.body), room)[0];
+  expect(afterFold).toMatchObject({
+    state: 'closed',
+    verified: true,
+    outcome: beforeFold.outcome,
+    revision: beforeFold.revision,
+  });
+  expect(COMPACT_DECISIONS_AT).toBe(2000);
+});
+
+test('multi-person e2e: agent asks room, peers advise, people vote, majority settles early, closes honestly, wakes agent', () => {
+  // 1. Gemini (agent operated by Dom) asks the room an architectural question.
+  const open = openDecision({
+    ...as(gemini),
+    question: 'Which index structure for vector search in WormDB?',
+    options: ['HNSW', 'Flat IVFPQ', 'Brute force'],
+    context: 'Considering memory overhead vs recall latency',
+    askAgents: true,
+  });
+  expect(validDecisionBody(open, roomId)).toBe(true);
+
+  let current = fold([open])[0];
+  expect(current.options.map(o => o.label)).toEqual(['HNSW', 'Flat IVFPQ', 'Brute force']);
+
+  // 2. Peer agents provide advisory opinions (they must not count towards the tally or quorum).
+  const vesperAdvice = castVote(as(vesper), current, 'o1', 'Lowest query latency');
+  const geminiAdvice = castVote(as(gemini), current, 'o1', 'Best recall');
+  const startOps: (DecisionBody | VoteBody)[] = [open, vesperAdvice, geminiAdvice];
+
+  current = fold(startOps)[0];
+  expect(current.tally.voters).toBe(0);
+  expect(current.tally.result).toBe('no-votes');
+  expect(current.votes.filter(v => !v.counts).length).toBe(2);
+
+  // 3. Human votes begin: Dominique votes HNSW ('o1').
+  const domVote1 = castVote(as(dom), current, 'o1');
+  current = fold([...startOps, domVote1])[0];
+  expect(current.tally.voters).toBe(1);
+  expect(current.settled).toBe(false);
+
+  // 4. Igor (human host) adds an option 'SCaNN' to the open decision.
+  const addedScann = reviseDecision(as(igor), current, { addOption: 'SCaNN' });
+  expect(addedScann.options.length).toBe(4);
+  const scannOptId = addedScann.options[3].id;
+
+  // 5. Dominique changes vote to SCaNN (revision 2).
+  current = fold([...startOps, domVote1, addedScann])[0];
+  const domVote2 = castVote(as(dom), current, scannOptId, 'More compact quantization', 2);
+
+  // 6. Igor votes SCaNN. Now 2 of 3 people have voted for SCaNN.
+  const igorVote = castVote(as(igor), current, scannOptId, 'Agreed');
+  const votingOps = [...startOps, domVote1, addedScann, domVote2, igorVote];
+  current = fold(votingOps)[0];
+
+  // 2 people out of 3 voted for SCaNN; Sam (1 remaining) cannot catch up -> settled early!
+  expect(current.settled).toBe(true);
+  expect(due(current, Date.now())).toBe(true);
+  expect(current.tally).toMatchObject({
+    result: 'decided',
+    optionIds: [scannOptId],
+    voters: 2,
+    people: 3,
+  });
+
+  // 7. Creator (Gemini) closes the decision once due.
+  const closed = reviseDecision(as(gemini), current, { close: true });
+  expect(closed.state).toBe('closed');
+  const allOps = [...votingOps, closed];
+
+  const finalDecisions = fold(allOps);
+  const final = finalDecisions[0];
+  expect(final.state).toBe('closed');
+  expect(final.verified).toBe(true);
+  expect(final.outcome?.optionIds).toEqual([scannOptId]);
+
+  // 8. Wake on Consensus: Gemini's device wakes up because its decision resolved!
+  const wakes = decisionWakes(allOps, room, gemini, startOps.length);
+  expect(wakes.resolved.map(d => d.id)).toEqual([open.decisionId]);
+  expect(wakes.resolved[0].outcome?.optionIds).toEqual([scannOptId]);
+
+  // 9. Compaction shrinks the ops while preserving the exact outcome and verified state.
+  const packets: DecisionPacket[] = allOps.map((body, i) => ({ body, signature: `sig-${i}` }));
+  const compacted = compactDecisions(packets, room);
+  expect(compacted.length).toBeLessThan(packets.length);
+  expect(foldDecisions(compacted.map(p => p.body), room)[0]).toMatchObject({
+    state: 'closed',
+    verified: true,
+    outcome: final.outcome,
+  });
+});
+
