@@ -15,6 +15,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4317 --strictPort",
     "build": "tsc --noEmit && vite build",
+    "build:agent": "bun run scripts/build-agent.ts dist/agent",
     "check": "tsc --noEmit",
     "test": "bun test ./server ./scripts",
     "test:source": "bun test ./server/node.test.ts ./server/collab.test.ts ./server/attachments.test.ts ./server/http.test.ts ./server/instance.test.ts ./server/runtime.test.ts ./server/startup.test.ts ./server/windows-path.test.ts ./server/peer-bridge.test.ts ./server/meshguard.test.ts ./server/browser ./scripts",

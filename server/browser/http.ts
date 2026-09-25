@@ -5,23 +5,11 @@ import { BrowserLobby, LobbyError } from './lobby';
 
 const explainer = fileURLToPath(new URL('./agent-join.md', import.meta.url));
 const escape = (text: string) => text.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-/** Just enough Markdown for the agent explainer: headings, paragraphs, lists and fenced code, all escaped. */
-function explainerHtml(markdown: string) {
-  const html: string[] = []; let code: string[] | null = null; let list = false;
-  const closeList = () => { if (list) { html.push('</ul>'); list = false; } };
-  for (const line of markdown.split('\n')) {
-    if (line.startsWith('```')) { if (code) { html.push(`<pre><code>${escape(code.join('\n'))}</code></pre>`); code = null; } else { closeList(); code = []; } continue; }
-    if (code) { code.push(line); continue; }
-    const heading = /^(#{1,3}) (.*)$/.exec(line);
-    if (heading) { closeList(); html.push(`<h${heading[1].length}>${escape(heading[2])}</h${heading[1].length}>`); continue; }
-    if (/^[-*] /.test(line)) { if (!list) { html.push('<ul>'); list = true; } html.push(`<li>${escape(line.slice(2))}</li>`); continue; }
-    closeList();
-    if (line.trim()) html.push(`<p>${escape(line)}</p>`);
-  }
-  if (code) html.push(`<pre><code>${escape(code.join('\n'))}</code></pre>`);
-  closeList();
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Connect an agent · Meshrooms</title></head><body><main>${html.join('')}</main></body></html>`;
-}
+/** The page for people shows the same Markdown agents read, escaped, so nothing can render differently. */
+const explainerHtml = (markdown: string, roomId: string) => '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+  + `<meta name="robots" content="noindex"><title>Connect an agent · Meshrooms</title></head><body><main><p><a href="/agent/${roomId}.md">Plain Markdown</a></p><pre>${escape(markdown)}</pre></main></body></html>`;
+/** A host chooses the room title, so it may not carry Markdown or look like instructions set apart from the text. */
+const plainTitle = (title: string) => title.replace(/[`*_[\]<>#|\\]/g, '').trim() || 'Untitled room';
 
 export type BrowserHttpOptions = { trustLoopbackProxy?: boolean; apiLimit?: number; createLimit?: number; revision?: string; now?: () => number };
 export function browserHandler(lobby: BrowserLobby, origin: string, distDir: string, options: BrowserHttpOptions = {}) {
@@ -75,12 +63,22 @@ export function browserHandler(lobby: BrowserLobby, origin: string, distDir: str
         return json(await lobby.execute(input as Parameters<BrowserLobby['execute']>[0]));
       }
       if (request.method !== 'GET' && request.method !== 'HEAD') return json({ error: 'Method not allowed.' }, 405);
+      // The agent bridge is built from the same commit at deploy, next to the browser assets.
+      const bundle = /^\/agent\/meshrooms-agent\.js(\.sha256)?$/.exec(url.pathname);
+      if (bundle) {
+        const file = Bun.file(resolve(root, 'agent', `meshrooms-agent.js${bundle[1] || ''}`));
+        if (!await file.exists()) return json({ error: 'The agent bridge is not built on this server.' }, 404);
+        return new Response(request.method === 'HEAD' ? null : file, { headers: { ...headers, 'Content-Type': bundle[1] ? 'text/plain; charset=utf-8' : 'text/javascript; charset=utf-8' } });
+      }
       // The agent link's token lives in the URL fragment, so it never reaches this server or its logs.
       const agentPage = /^\/agent\/([a-f0-9-]{36})(\.md)?$/.exec(url.pathname);
       if (agentPage) {
-        lobby.publicRoom(agentPage[1]);
-        const text = (await Bun.file(explainer).text()).replaceAll('{{ORIGIN}}', origin).replaceAll('{{ROOM_ID}}', agentPage[1]);
-        const body = agentPage[2] ? text : explainerHtml(text);
+        const room = lobby.publicRoom(agentPage[1]);
+        const digest = Bun.file(resolve(root, 'agent', 'meshrooms-agent.js.sha256'));
+        const sha256 = await digest.exists() ? (await digest.text()).split(/\s/)[0] : 'unavailable: the agent bridge is not built on this server';
+        const text = (await Bun.file(explainer).text()).replaceAll('{{ORIGIN}}', origin).replaceAll('{{ROOM_ID}}', room.roomId)
+          .replaceAll('{{ROOM_TITLE}}', plainTitle(room.title)).replaceAll('{{BUNDLE_SHA256}}', sha256);
+        const body = agentPage[2] ? text : explainerHtml(text, room.roomId);
         return new Response(request.method === 'HEAD' ? null : body, { headers: { ...headers, 'Content-Type': agentPage[2] ? 'text/markdown; charset=utf-8' : 'text/html; charset=utf-8' } });
       }
       const route =url.pathname === '/rooms' || /^\/r\/[a-f0-9-]{36}$/.test(url.pathname);

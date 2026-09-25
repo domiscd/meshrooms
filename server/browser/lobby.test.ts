@@ -3,6 +3,7 @@ import { base64, browserProtocol, encode, type Command, type RoomStatus } from '
 import { BrowserLobby } from './lobby';
 import { browserHandler } from './http';
 import { testDirectory } from '../test-directory';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const origin = 'http://127.0.0.1:4320';
@@ -268,21 +269,33 @@ test('agent links are capped per person, and agents leave with their operator', 
   } finally { lobby.close(); }
 });
 
-test('the agent explainer is served per room as Markdown and escaped HTML, under the runtime policy', async () => {
+test('the agent explainer and bridge are served per room, with a plain room title and the bundle hash', async () => {
   const lobby = new BrowserLobby(':memory:', { origin });
+  const dir = testDirectory('agent-explainer');
   try {
-    const handle = browserHandler(lobby, origin, 'dist'), host = await client(lobby), room = crypto.randomUUID();
-    expect((await handle(new Request(`${origin}/agent/${room}`))).status).toBe(404);
-    await host.send('create', room, { title: 'Work <b>', name: 'Alex', label: 'Desktop' });
+    const host = await client(lobby), room = crypto.randomUUID();
+    const bare = browserHandler(lobby, origin, dir.path);
+    expect((await bare(new Request(`${origin}/agent/${room}`))).status).toBe(404);
+    expect((await bare(new Request(`${origin}/agent/meshrooms-agent.js`))).status).toBe(404);
+    await host.send('create', room, { title: 'Work <b>**`', name: 'Alex', label: 'Desktop' });
+    expect(await (await bare(new Request(`${origin}/agent/${room}.md`))).text()).toContain('unavailable: the agent bridge is not built');
+
+    mkdirSync(join(dir.path, 'agent'));
+    writeFileSync(join(dir.path, 'agent', 'meshrooms-agent.js'), 'console.log(1)');
+    writeFileSync(join(dir.path, 'agent', 'meshrooms-agent.js.sha256'), `${'a'.repeat(64)}  meshrooms-agent.js\n`);
+    const handle = browserHandler(lobby, origin, dir.path);
     const markdown = await handle(new Request(`${origin}/agent/${room}.md`));
     expect(markdown.headers.get('content-type')).toContain('text/markdown');
     const text = await markdown.text();
-    expect(text).toContain(room); expect(text).toContain(origin); expect(text).not.toContain('{{');
+    expect(text).toContain(`${origin}/agent/${room}`); expect(text).toContain('a'.repeat(64)); expect(text).toContain('**Work b**'); expect(text).not.toContain('{{');
     const page = await handle(new Request(`${origin}/agent/${room}`));
     expect(page.headers.get('content-type')).toContain('text/html');
     expect(page.headers.get('content-security-policy')).toContain("script-src 'self'");
     const html = await page.text();
-    expect(html).toContain('<h1>Connect an agent'); expect(html).toContain(room); expect(html).not.toContain('<script');
+    expect(html).toContain('<pre># Join a Meshrooms room as an agent'); expect(html).not.toContain('<script'); expect(html).toContain('&lt;the link, including #token&gt;');
+    const script = await handle(new Request(`${origin}/agent/meshrooms-agent.js`));
+    expect(script.headers.get('content-type')).toContain('text/javascript'); expect(await script.text()).toBe('console.log(1)');
+    expect(await (await handle(new Request(`${origin}/agent/meshrooms-agent.js.sha256`))).text()).toStartWith('a'.repeat(64));
     expect((await handle(new Request(`${origin}/agent/${room}/../../lobby.ts`))).status).toBe(404);
-  } finally { lobby.close(); }
+  } finally { lobby.close(); dir.cleanup(); }
 });
