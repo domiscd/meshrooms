@@ -1,6 +1,15 @@
 import { resolve, sep } from 'node:path';
 import { isIP } from 'node:net';
+import { fileURLToPath } from 'node:url';
 import { BrowserLobby, LobbyError } from './lobby';
+
+const explainer = fileURLToPath(new URL('./agent-join.md', import.meta.url));
+const escape = (text: string) => text.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+/** The page for people shows the same Markdown agents read, escaped, so nothing can render differently. */
+const explainerHtml = (markdown: string, roomId: string) => '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+  + `<meta name="robots" content="noindex"><title>Connect an agent · Meshrooms</title></head><body><main><p><a href="/agent/${roomId}.md">Plain Markdown</a></p><pre>${escape(markdown)}</pre></main></body></html>`;
+/** A host chooses the room title, so it may not carry Markdown or look like instructions set apart from the text. */
+const plainTitle = (title: string) => title.replace(/[`*_[\]<>#|\\]/g, '').trim() || 'Untitled room';
 
 export type BrowserHttpOptions = { trustLoopbackProxy?: boolean; apiLimit?: number; createLimit?: number; revision?: string; now?: () => number };
 export function browserHandler(lobby: BrowserLobby, origin: string, distDir: string, options: BrowserHttpOptions = {}) {
@@ -38,6 +47,15 @@ export function browserHandler(lobby: BrowserLobby, origin: string, distDir: str
         if (!charge(rates, address, 60_000, options.apiLimit || 240)) return json({ error: 'Too many requests. Try again shortly.' }, 429);
         if (url.pathname === '/api/lobby/health' && request.method === 'GET') return json({ ok: lobby.healthy(), revision: options.revision || 'development' });
         if (request.method === 'GET' && /^\/api\/lobby\/rooms\/[a-f0-9-]{36}$/.test(url.pathname)) return json(lobby.publicRoom(url.pathname.split('/').at(-1)!));
+        // Member ids are only shown to admitted members, and the hash pins one picture, so the response can be cached forever.
+        const avatar = /^\/api\/lobby\/rooms\/([a-f0-9-]{36})\/avatars\/([a-f0-9-]{36})$/.exec(url.pathname);
+        if (avatar && request.method === 'GET') {
+          const hash = url.searchParams.get('h') || '';
+          const picture = /^[a-f0-9]{16}$/.test(hash) ? lobby.avatar(avatar[1], avatar[2], hash) : null;
+          if (!picture) return json({ error: 'Not found.' }, 404);
+          return new Response(new Uint8Array(picture.bytes), { headers: { ...headers, 'Content-Type': picture.type, 'Cache-Control': 'private, max-age=31536000, immutable',
+            'Content-Security-Policy': "default-src 'none'; sandbox", 'Cross-Origin-Resource-Policy': 'same-origin' } });
+        }
         if (url.pathname !== '/api/lobby' || request.method !== 'POST') return json({ error: 'Not found.' }, 404);
         if (request.headers.get('origin') !== origin || request.headers.get('content-type')?.split(';')[0] !== 'application/json') return json({ error: 'Use the room application to submit requests.' }, 403);
         // Enforce the streamed limit, not only a client-supplied Content-Length.
@@ -54,6 +72,24 @@ export function browserHandler(lobby: BrowserLobby, origin: string, distDir: str
         return json(await lobby.execute(input as Parameters<BrowserLobby['execute']>[0]));
       }
       if (request.method !== 'GET' && request.method !== 'HEAD') return json({ error: 'Method not allowed.' }, 405);
+      // The agent bridge is built from the same commit at deploy, next to the browser assets.
+      const bundle = /^\/agent\/meshrooms-agent\.js(\.sha256)?$/.exec(url.pathname);
+      if (bundle) {
+        const file = Bun.file(resolve(root, 'agent', `meshrooms-agent.js${bundle[1] || ''}`));
+        if (!await file.exists()) return json({ error: 'The agent bridge is not built on this server.' }, 404);
+        return new Response(request.method === 'HEAD' ? null : file, { headers: { ...headers, 'Content-Type': bundle[1] ? 'text/plain; charset=utf-8' : 'text/javascript; charset=utf-8' } });
+      }
+      // The agent link's token lives in the URL fragment, so it never reaches this server or its logs.
+      const agentPage = /^\/agent\/([a-f0-9-]{36})(\.md)?$/.exec(url.pathname);
+      if (agentPage) {
+        const room = lobby.publicRoom(agentPage[1]);
+        const digest = Bun.file(resolve(root, 'agent', 'meshrooms-agent.js.sha256'));
+        const sha256 = await digest.exists() ? (await digest.text()).split(/\s/)[0] : 'unavailable: the agent bridge is not built on this server';
+        const text = (await Bun.file(explainer).text()).replaceAll('{{ORIGIN}}', origin).replaceAll('{{ROOM_ID}}', room.roomId)
+          .replaceAll('{{ROOM_TITLE}}', plainTitle(room.title)).replaceAll('{{BUNDLE_SHA256}}', sha256);
+        const body = agentPage[2] ? text : explainerHtml(text, room.roomId);
+        return new Response(request.method === 'HEAD' ? null : body, { headers: { ...headers, 'Content-Type': agentPage[2] ? 'text/markdown; charset=utf-8' : 'text/html; charset=utf-8' } });
+      }
       const route = url.pathname === '/rooms' || /^\/r\/[a-f0-9-]{36}$/.test(url.pathname);
       const relative = route ? 'index.html' : url.pathname.replace(/^\//, '');
       if (!route && !/^assets\/[a-zA-Z0-9_.-]+$/.test(relative)) return json({ error: 'Not found.' }, 404);

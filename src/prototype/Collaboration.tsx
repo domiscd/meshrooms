@@ -1,17 +1,42 @@
-import { useState, type KeyboardEvent, type RefObject } from 'react';
+import { Fragment, useMemo, useState, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { AGENTS_MENTION, TASK_STATUSES, mentionSegments, type Floor, type Task, type TaskStatus } from '../collab';
+import { parseMarkdown, type Block, type Inline } from '../markdown';
 import type { Attachment, Participant, RoomSnapshot, TaskDraft } from '../room';
 
 const statusLabels: Record<TaskStatus, string> = { todo: 'To do', doing: 'In progress', done: 'Done' };
 
-/** Message text with @mentions marked; mentions of the viewer are stronger. */
+/** Message markdown with @mentions marked; mentions of the viewer are stronger. Code stays literal. */
 export function MentionText({ text, participants, viewerId }: { text: string; participants: Participant[]; viewerId?: string }) {
-  const viewer = participants.find(p => p.id === viewerId);
-  return <>{mentionSegments(text, participants).map((segment, index) => {
-    if (!segment.mention) return segment.text;
-    const you = !!viewer && segment.text.slice(1).toLowerCase() === viewer.name.toLowerCase();
-    return <span key={index} className={`mention ${you ? 'you' : ''}`}>{segment.text}</span>;
-  })}</>;
+  const blocks = useMemo(() => parseMarkdown(text), [text]);
+  const viewer = participants.find(p => p.id === viewerId)?.name.toLowerCase();
+  const mentions = (value: string) => mentionSegments(value, participants).map((segment, index) => segment.mention
+    ? <span key={index} className={`mention ${segment.text.slice(1).toLowerCase() === viewer ? 'you' : ''}`}>{segment.text}</span>
+    : segment.text);
+  const inline = (nodes: Inline[]): ReactNode[] => nodes.map((node, key) => {
+    switch (node.type) {
+      case 'text': return <Fragment key={key}>{mentions(node.text)}</Fragment>;
+      case 'strong': return <strong key={key}>{inline(node.children)}</strong>;
+      case 'em': return <em key={key}>{inline(node.children)}</em>;
+      case 'code': return <code key={key}>{node.text}</code>;
+      case 'link': return <a key={key} href={node.href} target="_blank" rel="noopener noreferrer">{inline(node.children)}</a>;
+      case 'br': return <br key={key} />;
+    }
+  });
+  const block = (node: Block, key: number): ReactNode => {
+    switch (node.type) {
+      case 'paragraph': return <p key={key}>{inline(node.children)}</p>;
+      case 'heading': return <p key={key} className="md-heading"><strong>{inline(node.children)}</strong></p>;
+      case 'code': return <figure key={key} className="md-code">{node.lang && <figcaption>{node.lang}</figcaption>}<pre><code>{node.text}</code></pre></figure>;
+      case 'quote': return <blockquote key={key}>{node.children.map(block)}</blockquote>;
+      case 'rule': return <hr key={key} />;
+      case 'list': {
+        // A leading paragraph stays inline so tight lists read like lists, not stacked paragraphs.
+        const items = node.items.map((item, index) => <li key={index}>{item.map((child, at) => !at && child.type === 'paragraph' ? <Fragment key={at}>{inline(child.children)}</Fragment> : block(child, at))}</li>);
+        return node.ordered ? <ol key={key} start={node.start === 1 ? undefined : node.start}>{items}</ol> : <ul key={key}>{items}</ul>;
+      }
+    }
+  };
+  return <>{blocks.map(block)}</>;
 }
 
 export function FloorControl({ floor, disabled, onChange }: { floor: Floor; disabled: boolean; onChange: (floor: Floor) => void }) {
@@ -38,7 +63,11 @@ export function useMentions(participants: Participant[], viewerId: string | unde
   const agents = participants.filter(p => p.role === 'agent');
   const options: MentionOption[] = [
     ...participants.filter(p => p.id !== viewerId).sort((a, b) => a.role === b.role ? 0 : a.role === 'agent' ? -1 : 1)
-      .map(p => ({ key: p.id, label: p.name, detail: p.role, agent: p.role === 'agent' })),
+      .map(p => {
+        const operator = participants.find(o => o.id === p.operatorId);
+        const detail = p.role === 'agent' ? operator ? `agent · ${operator.id === viewerId ? 'yours' : `${operator.name}'s`}` : 'agent' : p.machine ? `human · ${p.machine}` : 'human';
+        return { key: p.id, label: p.name, detail, agent: p.role === 'agent' };
+      }),
     ...(agents.length > 1 ? [{ key: AGENTS_MENTION, label: AGENTS_MENTION, detail: `all ${agents.length} agents`, agent: true }] : []),
   ].filter(option => !state || option.label.toLowerCase().startsWith(state.query.toLowerCase()));
   const open = !!state && options.length > 0;

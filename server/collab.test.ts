@@ -5,7 +5,7 @@ import { createHandler } from './http';
 import { NodeAccess } from './access';
 import { testStartupManager } from './startup';
 import { tokenHash } from './model';
-import { evaluateWake, mentionSegments, mentionedIds } from '../src/collab';
+import { evaluateWake, mayAgentSpeak, mentionSegments, mentionedIds } from '../src/collab';
 import type { Message } from '../src/room';
 
 const people = [
@@ -139,4 +139,129 @@ test('HTTP exposes floor and task commands for the owner session', async () => {
     expect((await post('tasks/remove', { roomId, requestId: randomUUID(), taskId, revision: 2 })).status).toBe(200);
     expect(node.snapshot().rooms[0]).toMatchObject({ floor: 'open', tasks: [], boardRevision: 3 });
   } finally { node.close(); }
+});
+
+test('an operator-only agent wakes and may speak only for its operator', () => {
+  const roster = [
+    { id: 'igor', name: 'Igor', role: 'human' as const },
+    { id: 'ana', name: 'Ana', role: 'human' as const },
+    { id: 'codex', name: 'Codex', role: 'agent' as const, operatorId: 'igor', wake: 'operator' as const },
+  ];
+  const msg = (id: string, authorId: string, text: string): Message => {
+    const author = roster.find(p => p.id === authorId)!;
+    return { id, authorId, author: author.name, role: author.role, text, time: new Date().toISOString(), mentions: mentionedIds(text, roster) };
+  };
+  const messages = [msg('m1', 'ana', '@Codex please look'), msg('m2', 'igor', 'context only')];
+  const task = { id: randomUUID(), title: 'Review', notes: '', status: 'todo' as const, assigneeId: 'codex', assignedBy: 'ana', assignedRevision: 1,
+    createdBy: 'ana', updatedBy: 'ana', updatedAt: new Date().toISOString(), revision: 1 };
+  const room = { floor: 'humans-first' as const, participants: roster, messages, tasks: [task], boardRevision: 1 };
+  expect(evaluateWake(room, 'codex', 'm1', 0)).toMatchObject({ state: 'waiting' });
+  expect(evaluateWake({ ...room, messages: [msg('m0', 'igor', 'start')] }, 'codex', 'm0', 0).tasks).toEqual([]);
+  messages.push(msg('m3', 'igor', '@Codex go ahead'));
+  expect(evaluateWake(room, 'codex', 'm2', 0)).toMatchObject({ state: 'addressed', addressed: ['m3'] });
+  expect(evaluateWake({ ...room, floor: 'open' }, 'codex', 'm1', 0).addressed).toEqual(['m2', 'm3']);
+  expect(evaluateWake({ ...room, tasks: [{ ...task, assignedBy: 'igor' }] }, 'codex', 'm3', 0).tasks).toHaveLength(1);
+  // With the default policy, anyone's mention wakes it again.
+  expect(evaluateWake({ ...room, participants: roster.map(p => p.id === 'codex' ? { ...p, wake: 'anyone' as const } : p) }, 'codex', undefined, 0).addressed).toEqual(['m1', 'm3']);
+});
+
+test('the node grants local agents an operator, carries it in descriptors, and lets only the operator change who can wake them', () => {
+  const a = memoryNode().node, b = memoryNode().node;
+  try {
+    const { roomId, agent } = agentRoom(a, 'Codex');
+    const roomB = agentRoom(b, 'Grok');
+    const local = a.snapshot().rooms[0].participants;
+    expect(local.find(p => p.role === 'agent')).toMatchObject({ operatorId: a.owner.participantId, machine: 'Test', wake: 'anyone' });
+    expect(local.find(p => p.role === 'human')).toMatchObject({ machine: 'Test' });
+    const descriptor = a.descriptor(roomId, 'a'.repeat(64));
+    expect(descriptor.participants.find(p => p.role === 'agent')?.operatorId).toBe(a.owner.participantId);
+    expect(descriptor.machine).toBe('Test');
+
+    expect(() => a.setAgentWake({ roomId, requestId: randomUUID(), agentId: agent.participantId, wake: 'operator' }, agent)).toThrow('human session');
+    expect(() => a.setAgentWake({ roomId, requestId: randomUUID(), agentId: a.owner.participantId, wake: 'operator' })).toThrow('agent on this machine');
+    a.setAgentWake({ roomId, requestId: randomUUID(), agentId: agent.participantId, wake: 'operator' });
+    expect(a.snapshot().rooms[0].participants.find(p => p.id === agent.participantId)?.wake).toBe('operator');
+
+    // A paired node shows the remote agent's operator; an older grant can gain attribution later but never change it.
+    b.createRoom({ title: 'Shared', requestId: roomId });
+    const legacy = { ...descriptor, machine: undefined, participants: descriptor.participants.map(({ id, name, role }) => ({ id, name, role })) };
+    b.pairRoom(legacy, 'b'.repeat(64));
+    const shared = () => b.snapshot().rooms.find(r => r.id === roomId)!.participants;
+    expect(shared().find(p => p.id === agent.participantId)?.operatorId).toBeUndefined();
+    b.pairRoom(descriptor, 'b'.repeat(64));
+    expect(shared().find(p => p.id === agent.participantId)).toMatchObject({ operatorId: a.owner.participantId, machine: 'Test', state: 'remote' });
+    const other = descriptor.participants.find(p => p.role === 'human')!;
+    expect(() => b.pairRoom({ ...descriptor, participants: descriptor.participants.map(p => p.role === 'agent' ? { ...p, operatorId: randomUUID() } : p) }, 'b'.repeat(64))).toThrow();
+    expect(() => b.pairRoom({ ...descriptor, machine: 'Elsewhere' }, 'b'.repeat(64))).toThrow('different machine');
+    // Copilot's review: the same people paired into another room keep their attribution and cannot change machine.
+    const later = randomUUID(), third = randomUUID();
+    b.createRoom({ title: 'Later', requestId: later }); b.createRoom({ title: 'Third', requestId: third });
+    expect(() => b.pairRoom({ ...descriptor, roomId: third, machine: 'Elsewhere' }, 'b'.repeat(64))).toThrow('conflicts');
+    b.pairRoom({ ...legacy, roomId: later }, 'b'.repeat(64));
+    expect(b.snapshot().rooms.find(r => r.id === later)!.participants.find(p => p.id === agent.participantId)).toMatchObject({ operatorId: a.owner.participantId, machine: 'Test' });
+    // A node that first met them without attribution gains it when they are paired into another room.
+    const c = memoryNode().node;
+    try {
+      agentRoom(c, 'Gemini'); c.createRoom({ title: 'First', requestId: roomId }); c.createRoom({ title: 'Second', requestId: later });
+      c.pairRoom(legacy, 'c'.repeat(64));
+      c.pairRoom({ ...descriptor, roomId: later }, 'c'.repeat(64));
+      expect(c.snapshot().rooms.find(r => r.id === roomId)!.participants.find(p => p.id === agent.participantId)).toMatchObject({ operatorId: a.owner.participantId, machine: 'Test' });
+    } finally { c.close(); }
+    expect(other.role).toBe('human');
+    expect(roomB.roomId).not.toBe(roomId);
+  } finally { a.close(); b.close(); }
+});
+
+test('an operator-only agent ignores a person from the paired machine but answers its own operator', () => {
+  const a = memoryNode().node, b = memoryNode().node;
+  try {
+    const { roomId, agent } = agentRoom(a, 'Codex');
+    b.completeSetup({ requestId: randomUUID(), humanName: 'Ana', machineName: 'Laptop', startAtLogin: false });
+    b.createRoom({ title: 'Shared', requestId: roomId });
+    a.pairRoom(b.descriptor(roomId, 'b'.repeat(64)), 'a'.repeat(64));
+    b.pairRoom(a.descriptor(roomId, 'a'.repeat(64)), 'b'.repeat(64));
+    a.setAgentWake({ roomId, requestId: randomUUID(), agentId: agent.participantId, wake: 'operator' });
+    b.send({ roomId, requestId: randomUUID(), text: '@Codex can you check this?' });
+    const fromAna = b.pendingDelivery()[0].messages[0];
+    a.receivePeer(roomId, 'b'.repeat(64), fromAna);
+    expect(a.snapshot().rooms[0].participants.find(p => p.name === 'Ana')).toMatchObject({ state: 'remote', machine: 'Laptop' });
+    expect(() => a.send({ roomId, requestId: randomUUID(), text: 'On it', replyTo: fromAna.id }, agent)).toThrow('humans-first');
+    const own = a.send({ roomId, requestId: randomUUID(), text: '@Codex please answer Ana' });
+    a.send({ roomId, requestId: randomUUID(), text: 'Answering for Igor', replyTo: own.messageId }, agent);
+    expect(() => a.setAgentWake({ roomId, requestId: randomUUID(), agentId: agent.participantId, wake: 'sometimes' })).toThrow('anyone or operator');
+  } finally { a.close(); b.close(); }
+});
+
+test('an agent’s assignment wakes another agent only when the room allows agents to hand work to each other', () => {
+  const roster = [
+    { id: 'igor', name: 'Igor', role: 'human' as const },
+    { id: 'opus', name: 'Opus', role: 'agent' as const },
+    { id: 'vesper', name: 'Vesper', role: 'agent' as const },
+  ];
+  const task = { id: randomUUID(), title: 'Review', notes: '', status: 'todo' as const, assigneeId: 'vesper', assignedBy: 'opus', assignedRevision: 1,
+    createdBy: 'opus', updatedBy: 'opus', updatedAt: new Date().toISOString(), revision: 1 };
+  const room = { floor: 'humans-first' as const, participants: roster, messages: [], tasks: [task], boardRevision: 1 };
+  expect(evaluateWake(room, 'vesper', undefined, 0).tasks).toEqual([]);
+  expect(evaluateWake({ ...room, agentAssignmentsWake: true }, 'vesper', undefined, 0).tasks).toHaveLength(1);
+  // The assignee's own "only my operator" setting still applies.
+  const guarded = { ...room, agentAssignmentsWake: true, participants: roster.map(p => p.id === 'vesper' ? { ...p, operatorId: 'igor', wake: 'operator' as const } : p) };
+  expect(evaluateWake(guarded, 'vesper', undefined, 0).tasks).toEqual([]);
+});
+
+test("Copilot's review: an open floor does not let an operator-only agent speak for someone else", () => {
+  const participants = [
+    { id: 'igor', name: 'Igor', role: 'human' as const },
+    { id: 'ana', name: 'Ana', role: 'human' as const },
+    { id: 'codex', name: 'Codex', role: 'agent' as const, operatorId: 'igor', wake: 'operator' as const },
+  ];
+  const at = new Date().toISOString();
+  const messages: Message[] = [
+    { id: 'm1', authorId: 'ana', author: 'Ana', role: 'human', text: 'What do you think?', time: at },
+    { id: 'm2', authorId: 'igor', author: 'Igor', role: 'human', text: 'Thoughts?', time: at },
+  ];
+  const room = { floor: 'open' as const, participants, messages, tasks: [] };
+  expect(mayAgentSpeak(room, 'codex', 'm1')).toBe(false);
+  expect(mayAgentSpeak(room, 'codex', undefined)).toBe(false);
+  expect(mayAgentSpeak(room, 'codex', 'm2')).toBe(true);
+  expect(mayAgentSpeak({ ...room, participants: participants.map(p => ({ ...p, wake: 'anyone' as const })) }, 'codex', 'm1')).toBe(true);
 });

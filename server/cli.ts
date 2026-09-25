@@ -7,6 +7,7 @@ import { fingerprint, isUuid, tokenHash } from './model';
 import { ensureRunning, probeRuntime, type RuntimeRecord } from './runtime';
 import type { NodeSnapshot } from '../src/room';
 import { evaluateWake, type WakeResult } from '../src/collab';
+import { BrowserAgent, listenBrowser, parseConnectLink, parseRoomUrl, runBridge, sendBrowser } from './browser-agent';
 
 type ClientCredential = { version: 1; nodeId: string; dataDir: string; intentId: string; token: string; title: string; project: string; agentName: string };
 function parse(args: string[]) {
@@ -18,7 +19,7 @@ function parse(args: string[]) {
     values[key] = value;
   }
   const allowed = ['--data-dir', '--library', '--port', '--dev-origin', '--title', '--project', '--agent', '--request-id', '--credential', '--text', '--after', '--wait-seconds', '--room', '--descriptor',
-    '--reply-to', '--board-after', '--task', '--revision', '--status', '--notes', '--assignee', '--id', '--out'];
+    '--reply-to', '--board-after', '--task', '--revision', '--status', '--notes', '--assignee', '--id', '--out', '--url', '--name'];
   for (const key of Object.keys(values)) if (!allowed.includes(key)) throw new Error(`Unknown option ${key}.`);
   return { command, values, attach };
 }
@@ -132,8 +133,39 @@ export async function runCli(args: string[]): Promise<unknown> {
     'listen --credential PATH [--after MESSAGE_ID] [--board-after BOARD_CURSOR] [--wait-seconds 30]',
     'tasks --credential PATH', 'task-add --credential PATH --request-id UUID --title TEXT [--notes TEXT] [--assignee me|PARTICIPANT_ID]',
     'task-update --credential PATH --request-id UUID --task TASK_ID --revision N [--status todo|doing|done] [--title TEXT] [--notes TEXT] [--assignee me|none|PARTICIPANT_ID]',
+    'browser-join --link AGENT_LINK', 'browser-run --url ROOM_LINK', 'browser-listen --url ROOM_LINK [--after MESSAGE_ID] [--wait-seconds 30]',
+    'browser-send --url ROOM_LINK --request-id UUID --text TEXT [--reply-to MESSAGE_ID]',
     'transport', 'descriptor --room UUID', 'pair --descriptor PATH (operator-approved two-node development pairing)'],
     options: ['--data-dir PATH', '--library PATH', '--port NUMBER', '--dev-origin URL'], note: 'Browser links expire after two minutes. Agent credential files stay private on this machine.' };
+  if (command === 'browser-join') {
+    // Agents join only through an agent link a person in the room made, so the room shows who operates them.
+    const { origin, roomId, token } = parseConnectLink(requireText(values['--link'], '--link', 400));
+    const agent = new BrowserAgent(resolve(values['--data-dir'] || defaultOptions().dataDir), origin, roomId);
+    const identity = await agent.ensureIdentity();
+    let status = await agent.command('status', { session: randomUUID() }).catch(() => ({} as any));
+    if (!status.memberId) {
+      await agent.command('agent-redeem', { token, label: 'Meshrooms agent bridge' });
+      status = await agent.command('status', { session: randomUUID() }).catch(() => ({} as any));
+    }
+    return { state: status.memberId ? 'admitted' : 'waiting-for-host', deviceId: identity.id, roomId, title: status.title,
+      next: `Keep browser-run --url ${origin}/r/${roomId} running.` };
+  }
+  if (command.startsWith('browser-')) {
+    // A local agent's own device in a hosted browser room; its key stays in the node data directory.
+    const { origin, roomId } = parseRoomUrl(requireText(values['--url'], '--url', 300));
+    const agent = new BrowserAgent(resolve(values['--data-dir'] || defaultOptions().dataDir), origin, roomId);
+    if (command === 'browser-run') { await runBridge(agent); return; }
+    if (command === 'browser-listen') {
+      const seconds = Number(values['--wait-seconds'] || 30);
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60) throw new Error('Use --wait-seconds between 1 and 60.');
+      return listenBrowser(agent, values['--after'], seconds);
+    }
+    if (command === 'browser-send') {
+      if (!isUuid(values['--request-id'])) throw new Error('Use --request-id with a UUID and retain it for uncertain retries.');
+      return sendBrowser(agent, requireText(values['--text'], '--text', 4000), values['--reply-to'], values['--request-id']);
+    }
+    throw new Error(`Unknown command ${command}. Run help.`);
+  }
   const agentCommands = ['read', 'send', 'listen', 'tasks', 'task-add', 'task-update', 'attachment'];
   if (attach.length && command !== 'send') throw new Error('Use --attach only with send.');
   if (!['status', 'ensure', 'open', 'start', 'transport', 'descriptor', 'pair', ...agentCommands].includes(command)) throw new Error(`Unknown command ${command}. Run help.`);
@@ -151,7 +183,7 @@ export async function runCli(args: string[]): Promise<unknown> {
       const snapshot = await api(runtime, credential.token, 'snapshot') as NodeSnapshot; const room = snapshot.rooms.find(r => r.id === credential.intentId);
       if (!room) throw new Error('The agent is no longer admitted to this room.');
       return { roomId: room.id, participantId: snapshot.localParticipantId, floor: room.floor, boardCursor: room.boardRevision, tasks: room.tasks,
-        participants: room.participants.map(({ id, name, role, state }) => ({ id, name, role, state })) };
+        participants: room.participants.map(({ id, name, role, state, operatorId, machine, wake }) => ({ id, name, role, state, operatorId, machine, wake })) };
     }
     const id = values['--request-id']; if (!isUuid(id)) throw new Error('Use --request-id with a UUID and retain it for uncertain retries.');
     if (command === 'send') {

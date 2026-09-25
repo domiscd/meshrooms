@@ -1,8 +1,17 @@
 import { Database } from 'bun:sqlite';
-import { createHash, createHmac } from 'node:crypto';
-import { browserProtocol, deviceId, verify, type BrowserDevice, type BrowserMember, type JoinRequest, type RoomStatus, type Signal, type SignedCommand } from '../../src/browser/protocol';
+import { sniff } from '../attachments';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { browserProtocol, deviceId, verify, type BrowserDevice, type BrowserMember, type FormerDevice, type JoinRequest, type RoomSettings, type RoomStatus, type Signal, type SignedCommand, DEFAULT_ROOM_SETTINGS } from '../../src/browser/protocol';
 
-type Room = { id: string; title: string; ownerId: string; members: BrowserMember[]; devices: BrowserDevice[]; requests: JoinRequest[] };
+/** Only a hash of an agent link's token is kept; the link itself is shown once to the person who made it. */
+type StoredInvite = { tokenHash: string; operatorId: string; name: string; expiresAt: number };
+/** `retired` keeps the public keys of devices that left, so their earlier signed task changes still verify. */
+type Room = { id: string; title: string; ownerId: string; members: BrowserMember[]; devices: BrowserDevice[]; requests: JoinRequest[]; invites?: StoredInvite[]; retired?: FormerDevice[]; settings?: Partial<RoomSettings> };
+const RETIRED_DEVICES = 256;
+const INVITE_TTL = 900_000, INVITES_PER_PERSON = 4, AGENTS_PER_OPERATOR = 4;
+const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
+/** Avatars are small pictures kept apart from the room record; members carry only a short hash of theirs. */
+const AVATAR_BYTES = 16 * 1024, AVATAR_SIDE = 256, AVATAR_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 export class LobbyError extends Error { constructor(public status: number, message: string) { super(message); } }
 function fail(status: number, message: string): never { throw new LobbyError(status, message); }
 const uuid = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9-]{36}$/.test(v);
@@ -10,6 +19,14 @@ function label(v: unknown, max = 80): string {
   if (typeof v !== 'string' || !v.trim() || v.trim().length > max || /[\u0000-\u001f]/.test(v)) return fail(400, 'Enter a valid name.');
   return v.trim();
 }
+/** Members from before agents existed have no role and are people. */
+function isPerson(room: Room, memberId: string) { return room.members.some(m => m.id === memberId && (m.role ?? 'human') === 'human'); }
+/** Mentions resolve by name, so an agent may not share a name with anyone in the room or another open agent link. */
+function nameAvailable(room: Room, name: string, pending: StoredInvite[] = []) {
+  const taken = [...room.members.map(m => m.name), ...pending.map(i => i.name)];
+  if (taken.some(n => n.toLowerCase() === name.toLowerCase())) fail(409, 'Someone in this room already uses that name. Choose another agent name.');
+}
+const settingsOf = (room: Room): RoomSettings => ({ ...DEFAULT_ROOM_SETTINGS, ...room.settings });
 export type LobbyOptions = { origin: string; now?: () => number; stunUrls?: string[]; turnUrls?: string[]; turnSecret?: string };
 
 /** SQLite stores admission only. Signaling/presence expire in memory; no chat passes through this service. */
@@ -23,7 +40,7 @@ export class BrowserLobby {
   constructor(path: string, private options: LobbyOptions) {
     this.now = options.now || Date.now;
     this.db = new Database(path, { create: true });
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS receipts (device TEXT, id TEXT, body TEXT, result TEXT, at INTEGER, PRIMARY KEY(device,id));');
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS receipts (device TEXT, id TEXT, body TEXT, result TEXT, at INTEGER, PRIMARY KEY(device,id)); CREATE TABLE IF NOT EXISTS avatars (room TEXT, member TEXT, hash TEXT, type TEXT, bytes BLOB, PRIMARY KEY(room,member));');
   }
   close() { this.db.close(); }
   healthy() { this.db.query('SELECT 1').get(); return true; }
@@ -32,7 +49,11 @@ export class BrowserLobby {
     return row ? JSON.parse(row.body) : fail(404, 'This room is unavailable. Check the invitation.');
   }
   publicRoom(id: string) { const r = this.load(id); return { roomId: r.id, title: r.title }; }
-  async execute(input: SignedCommand): Promise<RoomStatus | { roomId: string }> {
+  /** A member's current avatar, only when the hash matches, so an old link never shows a newer picture. */
+  avatar(roomId: string, memberId: string, hash: string) {
+    return this.db.query('SELECT type, bytes FROM avatars WHERE room=? AND member=? AND hash=?').get(roomId, memberId, hash) as { type: string; bytes: Uint8Array } | null;
+  }
+  async execute(input: SignedCommand): Promise<RoomStatus | { roomId: string; token?: string }> {
     const c = input?.command;
     if (!c || c.protocol !== browserProtocol || c.origin !== this.options.origin || !uuid(c.id) || !uuid(c.roomId) || !Number.isSafeInteger(c.at) || Math.abs(this.now() - c.at) > 60_000 || !c.payload || typeof c.payload !== 'object' || Array.isArray(c.payload)) fail(400, 'This request has expired or is invalid. Try again.');
     if (typeof input.publicKey !== 'string' || typeof input.signature !== 'string' || !await verify(input.publicKey, c, input.signature)) fail(401, 'This device could not be authenticated.');
@@ -67,8 +88,12 @@ export class BrowserLobby {
         const admit = (r: JoinRequest) => {
           if (room.devices.length >= 16) fail(429, 'This room has reached its device limit.');
           if (r.kind === 'companion' && !r.linkedMemberId) fail(409, 'Confirm this device from its existing identity first.');
+          if (r.kind === 'agent') {
+            if (!r.operatorId || !isPerson(room, r.operatorId)) fail(409, 'This agent’s operator is no longer in the room.');
+            nameAvailable(room, r.name);
+          }
           const memberId = r.linkedMemberId || crypto.randomUUID();
-          if (!r.linkedMemberId) room.members.push({ id: memberId, name: r.name });
+          if (!r.linkedMemberId) room.members.push(r.kind === 'agent' ? { id: memberId, name: r.name, role: 'agent', operatorId: r.operatorId } : { id: memberId, name: r.name, role: 'human' });
           room.devices.push({ ...r.device, memberId, admittedAt: this.now() });
           r.state = 'admitted'; delete r.code;
         };
@@ -88,10 +113,51 @@ export class BrowserLobby {
           }
           case 'link': {
             if (!actor) fail(403, 'Join this room from your existing device first.');
+            // Agents are participants of their own; they cannot add devices to anyone's identity.
+            if (!isPerson(room, actor.memberId)) fail(403, 'Only people can confirm devices.');
             const r = room.requests.find(r => r.kind === 'companion' && r.code === c.payload.code && r.state === 'pending' && r.expiresAt > this.now()) || fail(404, 'Device code not found or expired.');
             if (r.linkedMemberId && r.linkedMemberId !== actor.memberId) fail(409, 'That device is already linked.');
             r.linkedMemberId = actor.memberId;
             if (isHost) admit(r);
+            break;
+          }
+          case 'agent-invite': {
+            if (!actor || !isPerson(room, actor.memberId)) fail(403, 'Only people in this room can connect agents.');
+            const invites = (room.invites || []).filter(i => i.expiresAt > this.now());
+            const name = label(c.payload.name, 64);
+            nameAvailable(room, name, invites);
+            if (invites.filter(i => i.operatorId === actor.memberId).length >= INVITES_PER_PERSON) fail(429, 'You already have four unused agent links. Use one or wait for them to expire.');
+            if (room.members.filter(m => m.role === 'agent' && m.operatorId === actor.memberId).length >= AGENTS_PER_OPERATOR) fail(429, 'You already have four agents in this room.');
+            const token = randomBytes(32).toString('base64url');
+            room.invites = [...invites, { tokenHash: tokenHash(token), operatorId: actor.memberId, name, expiresAt: this.now() + INVITE_TTL }];
+            this.save(room);
+            // Deliberately no receipt: the token is returned once and never retained. A retry creates a new link.
+            return { roomId: room.id, token };
+          }
+          case 'agent-redeem': {
+            if (actor) fail(409, 'This device is already in the room.');
+            const token = c.payload.token;
+            const invites = (room.invites || []).filter(i => i.expiresAt > this.now());
+            const invite = typeof token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(token) ? invites.find(i => i.tokenHash === tokenHash(token)) : undefined;
+            if (!invite || !isPerson(room, invite.operatorId)) fail(410, 'This agent link was already used or has expired. Ask for a new one.');
+            nameAvailable(room, invite.name);
+            // Checked again here: links made before the operator's earlier agents joined must not exceed the limit.
+            const operated = room.members.filter(m => m.role === 'agent' && m.operatorId === invite.operatorId).length
+              + room.requests.filter(r => r.kind === 'agent' && r.state === 'pending' && r.expiresAt > this.now() && r.operatorId === invite.operatorId).length;
+            if (operated >= AGENTS_PER_OPERATOR) fail(429, 'The person who made this link already has four agents in this room.');
+            if (room.devices.length >= 16) fail(429, 'This room has reached its device limit.');
+            room.invites = invites.filter(i => i !== invite);
+            room.requests = room.requests.filter(r => r.device.id !== id);
+            const device = { id, publicKey: input.publicKey, label: label(c.payload.label), memberId: '', admittedAt: 0 };
+            if (settingsOf(room).guestAgentApproval && invite.operatorId !== room.ownerId) {
+              // The link was used, but the host decides whether a guest's agent enters.
+              if (room.requests.filter(r => r.state === 'pending' && r.expiresAt > this.now()).length >= 16) fail(429, 'The waiting room is full. Please try again later.');
+              room.requests.push({ id: c.id, name: invite.name, kind: 'agent', state: 'pending', expiresAt: this.now() + 600_000, device, operatorId: invite.operatorId });
+              break;
+            }
+            const memberId = crypto.randomUUID();
+            room.members.push({ id: memberId, name: invite.name, role: 'agent', operatorId: invite.operatorId });
+            room.devices.push({ ...device, memberId, admittedAt: this.now() });
             break;
           }
           case 'cancel': {
@@ -110,12 +176,59 @@ export class BrowserLobby {
           }
           case 'remove': {
             const target = room.devices.find(d => d.id === c.payload.deviceId) || fail(404, 'Device not found.');
-            if (!actor || (!isHost && actor.memberId !== target.memberId)) fail(403, 'You cannot remove this device.');
+            const operates = !!actor && room.members.some(m => m.id === target.memberId && m.role === 'agent' && m.operatorId === actor.memberId);
+            if (!actor || (!isHost && actor.memberId !== target.memberId && !operates)) fail(403, 'You cannot remove this device.');
             if (target.memberId === room.ownerId && room.devices.filter(d => d.memberId === room.ownerId).length === 1) fail(409, 'Keep at least one host device.');
+            const removed = [target];
             room.devices = room.devices.filter(d => d.id !== target.id);
-            room.members = room.members.filter(m => room.devices.some(d => d.memberId === m.id));
-            room.requests = room.requests.filter(r => r.device.id !== target.id);
-            this.presence.delete(`${room.id}:${target.id}`); this.signals.delete(`${room.id}:${target.id}`);
+            // Agents leave with their operator: an agent never stays in a room its operator has left.
+            const present = (memberId: string) => room.devices.some(d => d.memberId === memberId);
+            for (const agent of room.members.filter(m => m.role === 'agent' && m.operatorId && !present(m.operatorId))) {
+              removed.push(...room.devices.filter(d => d.memberId === agent.id));
+              room.devices = room.devices.filter(d => d.memberId !== agent.id);
+            }
+            for (const gone of room.members.filter(m => !present(m.id))) this.db.query('DELETE FROM avatars WHERE room=? AND member=?').run(room.id, gone.id);
+            room.members = room.members.filter(m => present(m.id));
+            room.requests = room.requests.filter(r => !removed.some(d => d.id === r.device.id) && !(r.kind === 'agent' && r.operatorId && !present(r.operatorId)));
+            if (room.invites) room.invites = room.invites.filter(i => present(i.operatorId));
+            for (const device of removed) { this.presence.delete(`${room.id}:${device.id}`); this.signals.delete(`${room.id}:${device.id}`); }
+            room.retired = [...(room.retired || []).filter(d => !removed.some(r => r.id === d.id)), ...removed.map(({ id, publicKey, memberId }) => ({ id, publicKey, memberId }))].slice(-RETIRED_DEVICES);
+            break;
+          }
+          case 'profile': {
+            if (!actor) fail(403, 'Join this room first.');
+            const target = c.payload.memberId === undefined ? actor.memberId : c.payload.memberId;
+            const member = room.members.find(m => m.id === target) || fail(404, 'That person is not in this room.');
+            const own = member.id === actor.memberId, operated = member.role === 'agent' && member.operatorId === actor.memberId;
+            if (c.payload.avatar === null) {
+              // The host may clear anyone's picture; setting one is for yourself or the agents you operate.
+              if (!own && !operated && !isHost) fail(403, 'You can only change your own picture or your agents’.');
+              delete member.avatar; this.db.query('DELETE FROM avatars WHERE room=? AND member=?').run(room.id, member.id);
+              break;
+            }
+            if (!own && !operated) fail(403, 'You can only change your own picture or your agents’.');
+            const encoded = c.payload.avatar;
+            if (typeof encoded !== 'string' || encoded.length > Math.ceil(AVATAR_BYTES / 3) * 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) fail(413, 'Use a picture of at most 16 KB.');
+            const bytes = new Uint8Array(Buffer.from(encoded, 'base64'));
+            if (!bytes.length || bytes.length > AVATAR_BYTES) fail(413, 'Use a picture of at most 16 KB.');
+            const image = sniff(bytes);
+            if (!AVATAR_TYPES.includes(image.type)) fail(415, 'Use a PNG, JPEG or WebP picture.');
+            if (!image.width || !image.height || image.width > AVATAR_SIDE || image.height > AVATAR_SIDE) fail(400, 'Use a picture of at most 256 by 256 pixels.');
+            const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
+            this.db.query('INSERT OR REPLACE INTO avatars VALUES (?,?,?,?,?)').run(room.id, member.id, hash, image.type, bytes);
+            member.avatar = hash;
+            break;
+          }
+          case 'settings': {
+            if (!isHost) fail(403, 'Only the host can change room settings.');
+            const next: Partial<RoomSettings> = { ...room.settings };
+            if (c.payload.floor !== undefined) { if (!['humans-first', 'open'].includes(String(c.payload.floor))) fail(400, 'Choose when agents reply.'); next.floor = c.payload.floor as RoomSettings['floor']; }
+            for (const key of ['agentAssignmentsWake', 'guestAgentApproval'] as const) {
+              if (c.payload[key] === undefined) continue;
+              if (typeof c.payload[key] !== 'boolean') fail(400, 'Choose on or off.');
+              next[key] = c.payload[key] as boolean;
+            }
+            room.settings = next;
             break;
           }
           case 'signal': {
@@ -166,6 +279,10 @@ export class BrowserLobby {
     result.members = room.members.filter(m => room.devices.some(d => d.memberId === m.id));
     result.devices = room.devices.map(d => ({ ...d, session: online(d) }));
     if (actor.memberId === room.ownerId) result.requests = room.requests.filter(r => r.state === 'pending' && r.expiresAt > this.now()).map(r => { const { code, ...rest } = r; return rest; });
+    if (room.retired?.length) result.formerDevices = room.retired;
+    result.settings = settingsOf(room);
+    const invites = (room.invites || []).filter(i => i.operatorId === actor.memberId && i.expiresAt > this.now());
+    if (invites.length) result.agentInvites = invites.map(({ name, expiresAt }) => ({ name, expiresAt }));
     const key = `${room.id}:${id}`;
     const cursor = payload.epoch === this.epoch && typeof payload.cursor === 'number' && Number.isSafeInteger(payload.cursor) ? payload.cursor : 0;
     result.signals = (this.signals.get(key) || []).filter(s => s.targetSession === payload.session && s.seq > cursor && room.devices.some(d => d.id === s.from));

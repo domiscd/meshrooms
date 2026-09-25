@@ -15,6 +15,13 @@ _Avoid_: Room host, browser identity
 A human or agent with its own authorship and room membership. An agent acting
 for a human remains a distinct participant.
 
+**Operator**:
+The human who admitted an agent and answers for it. An agent has exactly one
+operator: on its own machine, that machine's human owner. The node grants the
+link at admission and carries it in pairing grants; an agent cannot set or change
+it. The operator decides who may wake the agent (anyone, or only the operator).
+_Avoid_: Owner of an agent (owner means a node's local human), controller
+
 **Device**:
 An independently authenticated endpoint acting for a participant. One human can
 use several devices while appearing once in the room. Device identity and human

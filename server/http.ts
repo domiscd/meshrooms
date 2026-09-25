@@ -156,7 +156,7 @@ export function createHandler({ node, origins, distDir, dataDir, access, startup
             startup: { preference: settings.startAtLogin ? 'login' : 'manual', ...startup.status() }, pending: node.pending(url.searchParams.get('intent') || undefined) });
         }
         if (request.method === 'POST') {
-          if (!['/api/node/rooms', '/api/node/rooms/join', '/api/node/rooms/floor', '/api/node/messages', '/api/node/tasks', '/api/node/tasks/update', '/api/node/tasks/remove',
+          if (!['/api/node/rooms', '/api/node/rooms/join', '/api/node/rooms/floor', '/api/node/rooms/agent-wake', '/api/node/messages', '/api/node/tasks', '/api/node/tasks/update', '/api/node/tasks/remove',
             '/api/node/setup', '/api/node/control/prepare', '/api/node/control/browser'].includes(url.pathname)) throw new NodeError(404, 'Unknown local command.');
           const body = await input(request);
           if (url.pathname === '/api/node/control/prepare') { node.requireOwner(principal); return json(node.prepareRoom(body), 201); }
@@ -173,6 +173,7 @@ export function createHandler({ node, origins, distDir, dataDir, access, startup
           if (url.pathname === '/api/node/rooms') return json(node.createRoom(body, principal), 201);
           if (url.pathname === '/api/node/rooms/join') return json(node.joinRoom(body, principal));
           if (url.pathname === '/api/node/rooms/floor') return json(node.setFloor(body, principal));
+          if (url.pathname === '/api/node/rooms/agent-wake') return json(node.setAgentWake(body, principal));
           if (url.pathname === '/api/node/tasks') return json(node.createTask(body, principal), 201);
           if (url.pathname === '/api/node/tasks/update') return json(node.updateTask(body, principal));
           if (url.pathname === '/api/node/tasks/remove') return json(node.removeTask(body, principal));

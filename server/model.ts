@@ -20,7 +20,8 @@ export const MAX_BOARD_RECEIPTS = 256;
 /** `files`: attachment IDs the paired node confirmed it stored (absent before attachment delivery existed). */
 export type RoomPeer = { key: string; participantIds: string[]; excluded: string[]; acknowledged: string[]; files?: string[] };
 /** `floor` is absent on rooms created before floor control; they read as humans-first. */
-export type RoomRecord = RoomInfo & { participantIds: string[]; requestId: string; fingerprint: string; peer?: RoomPeer; floor?: Floor };
+/** `operatorOnly`: local agents in this room that only their operator can wake. */
+export type RoomRecord = RoomInfo & { participantIds: string[]; requestId: string; fingerprint: string; peer?: RoomPeer; floor?: Floor; operatorOnly?: string[] };
 /** Board receipts make retried task commands idempotent per author and request ID. */
 export type BoardReceipt = { id: string; actorId: string; fingerprint: string; taskId: string; revision: number };
 export type Board = { version: 1; roomId: string; revision: number; tasks: Task[]; receipts: BoardReceipt[] };
@@ -40,7 +41,10 @@ export type Principal = { kind: 'owner'; participantId: string } | { kind: 'agen
 function named(value: unknown, max: number): value is string { return typeof value === 'string' && !!value.trim() && value.length <= max; }
 function participant(value: any): value is Participant {
   return !!value && isUuid(value.id) && named(value.name, 64) && ['human', 'agent'].includes(value.role)
-    && (value.state === 'local' ? value.peerKey === undefined : value.state === 'remote' && isHash(value.peerKey)) && typeof value.detail === 'string';
+    && (value.state === 'local' ? value.peerKey === undefined : value.state === 'remote' && isHash(value.peerKey)) && typeof value.detail === 'string'
+    // Operators and machine names are stored only for remote participants; local ones derive from the node.
+    && (value.operatorId === undefined || (value.state === 'remote' && value.role === 'agent' && isUuid(value.operatorId)))
+    && (value.machine === undefined || (value.state === 'remote' && named(value.machine, 64)));
 }
 function unique(values: unknown[]): boolean { return new Set(values).size === values.length; }
 export function validCatalog(value: any): value is Catalog {
@@ -55,9 +59,12 @@ export function validCatalog(value: any): value is Catalog {
   const people = new Map<string, Participant>(value.participants.map((p: Participant) => [p.id, p]));
   if (people.get(value.ownerId)?.role !== 'human' || people.get(value.ownerId)?.state !== 'local'
     || value.participants.filter((p: Participant) => p.role === 'human' && p.state === 'local').length !== 1) return false;
+  if (value.participants.some((p: Participant) => p.operatorId !== undefined && (people.get(p.operatorId)?.role !== 'human' || people.get(p.operatorId)?.peerKey !== p.peerKey))) return false;
   if (!value.rooms.every((r: any) => r && isUuid(r.id) && isUuid(r.requestId) && isHash(r.fingerprint)
     && named(r.title, 64) && typeof r.project === 'string' && r.project.length <= 48 && r.sample === false
     && (r.floor === undefined || FLOORS.includes(r.floor))
+    && (r.operatorOnly === undefined || (Array.isArray(r.operatorOnly) && unique(r.operatorOnly)
+      && r.operatorOnly.every((id: string) => r.participantIds.includes(id) && people.get(id)?.role === 'agent' && people.get(id)?.state === 'local')))
     && Array.isArray(r.participantIds) && unique(r.participantIds) && r.participantIds.includes(value.ownerId)
     && r.participantIds.every((id: string) => people.has(id))
     && (r.peer === undefined ? r.participantIds.every((id: string) => people.get(id)?.state === 'local')

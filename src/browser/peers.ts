@@ -1,10 +1,14 @@
+import type { Task } from '../collab';
+import { COMPACT_AT, MAX_TASK_OPS, compactBoard, foldBoard, syncChunks, taskBody, validTaskBody, type TaskChange, type TaskPacket } from './board';
 import { verify, type BrowserDevice, type RoomStatus } from './protocol';
 import { BrowserApi } from './client';
 import { read, sign, write } from './storage';
 
-type MessageBody = { kind: 'message'; roomId: string; id: string; deviceId: string; memberId: string; text: string; at: number };
+/** `replyTo` is optional so browsers from before replies keep verifying and storing these packets. */
+type MessageBody = { kind: 'message'; roomId: string; id: string; deviceId: string; memberId: string; text: string; at: number; replyTo?: string };
+const isId = (value: unknown) => typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
 type ReceiptBody = { kind: 'receipt'; roomId: string; id: string; deviceId: string };
-type Packet = { body: MessageBody | ReceiptBody; signature: string };
+type Packet = { body: MessageBody | ReceiptBody | TaskPacket['body']; signature: string };
 export type SavedMessage = { packet: Packet & { body: MessageBody }; targets: string[]; receipts: string[] };
 type Peer = { pc: RTCPeerConnection; session: string; channel?: RTCDataChannel; started: number };
 
@@ -17,11 +21,54 @@ export class BrowserPeers {
   private stopped = false;
   private pendingIncoming = 0;
   private key: string;
+  private boardKey: string;
+  private ops: TaskPacket[] = [];
   constructor(private api: BrowserApi, private roomId: string, private deviceId: string, private session: string,
-    private changed: (messages: SavedMessage[], connected: string[], added?: SavedMessage) => void, private error: (message: string) => void) {
+    private changed: (messages: SavedMessage[], connected: string[], added?: SavedMessage) => void, private error: (message: string) => void,
+    private boardChanged: (tasks: Task[]) => void = () => {}) {
     this.key = `messages:${deviceId}:${roomId}`;
+    this.boardKey = `board:${deviceId}:${roomId}`;
   }
-  async load() { this.messages = await read<SavedMessage[]>(this.key) || []; this.notify(); }
+  async load() {
+    this.messages = await read<SavedMessage[]>(this.key) || []; this.ops = await read<TaskPacket[]>(this.boardKey) || [];
+    this.notify(); this.notifyBoard();
+  }
+  private notifyBoard() { if (!this.stopped) this.boardChanged(foldBoard(this.ops.map(op => op.body))); }
+  /** Keeps operations we have not seen, compacting once the board grows large. */
+  private async addOps(incoming: TaskPacket[]) {
+    const fresh = incoming.filter(op => !this.ops.some(known => known.body.id === op.body.id));
+    if (!fresh.length) return;
+    let next = [...this.ops, ...fresh];
+    // Compaction keeps the same board with fewer operations; only a large board needs it.
+    if (next.length > COMPACT_AT) next = compactBoard(next);
+    if (next.length > MAX_TASK_OPS) throw new Error('This room’s task board is full in this preview.');
+    await write(this.boardKey, next); this.ops = next; this.notifyBoard();
+  }
+  /** Create a task (no current), change one, or remove it. Signed here and sent to every connected device. */
+  async changeTask(change: TaskChange, current?: Task, removed = false) {
+    return this.transaction(async () => {
+      if (!this.status?.memberId || this.stopped) throw new Error('Join the room before changing tasks.');
+      const body = taskBody({ roomId: this.roomId, deviceId: this.deviceId, memberId: this.status.memberId, current, change, removed });
+      const packet: TaskPacket = { body, signature: await sign(body) };
+      await this.addOps([packet]);
+      for (const peer of this.peers.values()) if (peer.channel?.readyState === 'open') { try { peer.channel.send(JSON.stringify(packet)); } catch { /* The board is exchanged again on reconnect. */ } }
+    });
+  }
+  /** Operations relayed in a board exchange are checked against each author's own device, not the sender's. */
+  private async acceptBoard(sync: { roomId?: unknown; ops?: unknown }) {
+    if (sync.roomId !== this.roomId || !Array.isArray(sync.ops) || sync.ops.length > 500) return;
+    const accepted: TaskPacket[] = [];
+    for (const op of sync.ops as TaskPacket[]) {
+      // A change by someone who has since left still verifies against the key the room service keeps for them.
+      const author = this.status?.devices?.find(d => d.id === op?.body?.deviceId) ?? this.status?.formerDevices?.find(d => d.id === op?.body?.deviceId);
+      if (!author || !validTaskBody(op.body, this.roomId) || op.body.memberId !== author.memberId || typeof op.signature !== 'string') continue;
+      if (await verify(author.publicKey, op.body, op.signature)) accepted.push({ body: op.body, signature: op.signature });
+    }
+    await this.addOps(accepted);
+  }
+  private sendBoard(channel: RTCDataChannel) {
+    for (const chunk of syncChunks(this.roomId, this.ops)) { try { channel.send(JSON.stringify(chunk)); } catch { return; } }
+  }
   private notify(added?: SavedMessage) { if (!this.stopped) this.changed([...this.messages], [...this.peers].filter(([, p]) => p.channel?.readyState === 'open').map(([id]) => id), added); }
   private transaction<T>(work: () => Promise<T>): Promise<T> {
     const next = this.serial.then(work); this.serial = next.catch(() => {}); return next;
@@ -30,12 +77,13 @@ export class BrowserPeers {
     const added = messages.length > this.messages.length ? messages.at(-1) : undefined;
     await write(this.key, messages); this.messages = messages; this.notify(added);
   }
-  async send(text: string) {
+  async send(text: string, replyTo?: string) {
     return this.transaction(async () => {
       if (!this.status?.memberId || this.stopped) throw new Error('Join the room before sending.');
       if (!text.trim() || text.length > 4000) throw new Error('Write a message of up to 4,000 characters.');
       if (this.messages.length >= 1000) throw new Error('This preview has reached its local history limit.');
-      const body: MessageBody = { kind: 'message', roomId: this.roomId, id: crypto.randomUUID(), deviceId: this.deviceId, memberId: this.status.memberId, text: text.trim(), at: Date.now() };
+      if (replyTo !== undefined && !this.messages.some(m => m.packet.body.id === replyTo)) throw new Error('The message you replied to is not in this browser.');
+      const body: MessageBody = { kind: 'message', roomId: this.roomId, id: crypto.randomUUID(), deviceId: this.deviceId, memberId: this.status.memberId, text: text.trim(), at: Date.now(), ...(replyTo ? { replyTo } : {}) };
       const packet = { body, signature: await sign(body) };
       const saved: SavedMessage = { packet, targets: this.status.devices!.filter(d => d.id !== this.deviceId).map(d => d.id), receipts: [] };
       await this.save([...this.messages, saved]); this.flush();
@@ -56,7 +104,7 @@ export class BrowserPeers {
   }
   private connectChannel(peer: Peer, id: string, channel: RTCDataChannel) {
     peer.channel = channel;
-    channel.onopen = () => { this.flush(); this.notify(); };
+    channel.onopen = () => { this.flush(); this.sendBoard(channel); this.notify(); };
     channel.onclose = () => this.notify();
     channel.onmessage = event => {
       if (typeof event.data !== 'string' || event.data.length > 20_000 || this.pendingIncoming >= 64) return;
@@ -66,10 +114,13 @@ export class BrowserPeers {
         const device = this.status.devices?.find(d => d.id === id); if (!device) return;
         let packet: Packet;
         try { packet = JSON.parse(event.data); } catch { return; }
+        if ((packet as unknown as { kind?: unknown })?.kind === 'board') { await this.acceptBoard(packet as never); return; }
         const b = packet?.body;
-        if (!b || b.roomId !== this.roomId || b.deviceId !== id || typeof b.id !== 'string' || !/^[a-f0-9-]{36}$/.test(b.id) || typeof packet.signature !== 'string' || !await verify(device.publicKey, b, packet.signature)) return;
+        if (!b || b.roomId !== this.roomId || b.deviceId !== id || !isId(b.id) || typeof packet.signature !== 'string' || !await verify(device.publicKey, b, packet.signature)) return;
         if (b.kind === 'message') {
           if (b.memberId !== device.memberId || typeof b.text !== 'string' || !b.text.trim() || b.text.length > 4000 || !Number.isSafeInteger(b.at) || b.at < 0 || b.at > 8_640_000_000_000_000) return;
+          // The replied-to message may predate this browser's admission, so only its form is checked.
+          if (b.replyTo !== undefined && !isId(b.replyTo)) return;
           const existing = this.messages.find(m => m.packet.body.id === b.id);
           if (existing && JSON.stringify(existing.packet.body) !== JSON.stringify(b)) return;
           if (!existing) {
@@ -82,6 +133,8 @@ export class BrowserPeers {
         } else if (b.kind === 'receipt') {
           const m = this.messages.find(m => m.packet.body.id === b.id && m.packet.body.deviceId === this.deviceId);
           if (m?.targets.includes(id) && !m.receipts.includes(id)) await this.save(this.messages.map(x => x === m ? { ...x, receipts: [...x.receipts, id] } : x));
+        } else if (b.kind === 'task') {
+          if (validTaskBody(b, this.roomId) && b.memberId === device.memberId) await this.addOps([{ body: b, signature: packet.signature }]);
         }
       }).catch(e => this.error(e.message)).finally(() => { this.pendingIncoming--; });
     };

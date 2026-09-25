@@ -66,7 +66,8 @@ export function mentionSegments(text: string, participants: Pick<Participant, 'i
   return segments;
 }
 
-type RoomView = { floor?: Floor; messages: Message[]; participants: Pick<Participant, 'id' | 'role'>[]; tasks?: Task[] };
+/** `agentAssignmentsWake`: a host setting in browser rooms that lets an agent's assignment wake another agent. */
+type RoomView = { floor?: Floor; messages: Message[]; participants: Pick<Participant, 'id' | 'role' | 'operatorId' | 'wake'>[]; tasks?: Task[]; agentAssignmentsWake?: boolean };
 
 /** A message addresses a participant by mentioning them or by replying to one of their messages. */
 export function addresses(message: Message, participantId: string, messages: Message[]): boolean {
@@ -76,24 +77,37 @@ export function addresses(message: Message, participantId: string, messages: Mes
 }
 
 const roleOf = (room: RoomView, id: string | undefined) => room.participants.find(p => p.id === id)?.role;
+/** An agent set to operator-only wakes solely for its operator; otherwise any person may wake it. */
+function mayWake(room: RoomView, agentId: string, authorId: string | undefined): boolean {
+  const agent = room.participants.find(p => p.id === agentId);
+  return agent?.wake !== 'operator' || (!!agent.operatorId && agent.operatorId === authorId);
+}
 
 /** Whether a message should wake an agent under the room's floor policy. Agents never wake themselves. */
 export function wakes(room: RoomView, message: Message, agentId: string): boolean {
-  if (message.authorId === agentId) return false;
+  if (message.authorId === agentId || !mayWake(room, agentId, message.authorId)) return false;
   if ((room.floor ?? DEFAULT_FLOOR) === 'open' && message.role === 'human') return true;
   if ((room.floor ?? DEFAULT_FLOOR) === 'humans-first' && message.role !== 'human') return false;
   return addresses(message, agentId, room.messages);
 }
 
-/** Whether an assignment should wake its agent: from a person in humans-first rooms, from anyone else in open rooms. */
+/**
+ * Whether an assignment should wake its agent: from a person in humans-first rooms (or from another agent when the room
+ * allows agents to hand work to each other), from anyone else in open rooms.
+ */
 export function assignmentWakes(room: RoomView, task: Task, agentId: string): boolean {
-  if (task.assigneeId !== agentId || task.status === 'done' || !task.assignedBy || task.assignedBy === agentId) return false;
-  return (room.floor ?? DEFAULT_FLOOR) === 'open' || roleOf(room, task.assignedBy) === 'human';
+  if (task.assigneeId !== agentId || task.status === 'done' || !task.assignedBy || task.assignedBy === agentId || !mayWake(room, agentId, task.assignedBy)) return false;
+  const assigner = roleOf(room, task.assignedBy);
+  return (room.floor ?? DEFAULT_FLOOR) === 'open' || assigner === 'human' || (!!room.agentAssignmentsWake && assigner === 'agent');
 }
 
-/** An agent may speak when replying to a message that woke it, or while holding open work a person assigned. */
+/**
+ * An agent may speak when replying to a message that woke it, or while holding open work a person assigned. An open
+ * floor lets agents speak freely, except one set to operator-only: it still speaks only on its operator's behalf.
+ */
 export function mayAgentSpeak(room: RoomView, agentId: string, replyTo: string | undefined): boolean {
-  if ((room.floor ?? DEFAULT_FLOOR) === 'open') return true;
+  const operatorOnly = room.participants.find(p => p.id === agentId)?.wake === 'operator';
+  if ((room.floor ?? DEFAULT_FLOOR) === 'open' && !operatorOnly) return true;
   const target = replyTo ? room.messages.find(m => m.id === replyTo) : undefined;
   if (target && wakes(room, target, agentId)) return true;
   return (room.tasks || []).some(task => assignmentWakes(room, task, agentId));
