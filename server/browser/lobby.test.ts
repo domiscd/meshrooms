@@ -299,3 +299,19 @@ test('the agent explainer and bridge are served per room, with a plain room titl
     expect((await handle(new Request(`${origin}/agent/${room}/../../lobby.ts`))).status).toBe(404);
   } finally { lobby.close(); dir.cleanup(); }
 });
+
+test('a member leaves by removing their own device, and their agents leave with them', async () => {
+  const lobby = new BrowserLobby(':memory:', { origin });
+  try {
+    const host = await client(lobby), room = crypto.randomUUID();
+    await host.send('create', room, { title: 'Work', name: 'Alex', label: 'Desktop' });
+    const sam = await admitPerson(lobby, host, room, 'Sam'), agent = await client(lobby);
+    const { token } = await sam.send('agent-invite', room, { name: 'Codex' }) as { token: string };
+    await agent.send('agent-redeem', room, { token, label: 'Node' });
+    await sam.send('remove', room, { deviceId: (await sam.status(room)).deviceId });
+    expect((await host.status(room)).members!.map(m => m.name)).toEqual(['Alex']);
+    expect((await sam.status(room)).memberId).toBeUndefined();
+    expect((await agent.status(room)).memberId).toBeUndefined();
+    await expect(host.send('remove', room, { deviceId: (await host.status(room)).deviceId })).rejects.toThrow('at least one host device');
+  } finally { lobby.close(); }
+});

@@ -56,6 +56,7 @@ export function BrowserRooms() {
   const [replyId, setReplyId] = useState<string>();
   const [agentName, setAgentName] = useState('');
   const [agentLink, setAgentLink] = useState<{ name: string; url: string }>();
+  const [confirming, setConfirming] = useState<string>();
   const composer = useRef<HTMLTextAreaElement>(null);
   const currentStatus = useRef<RoomStatus | undefined>(undefined);
   const lastRequest = useRef<JoinRequest | undefined>(undefined);
@@ -221,11 +222,24 @@ export function BrowserRooms() {
     try { await navigator.clipboard.writeText(agentLink.url); setNotice('Agent link copied. Give it to your agent.'); }
     catch { setNotice('Select the agent link and copy it.'); }
   }
-  function removeAgent(member: BrowserMember) {
+  /** Removes every device of a member; this device goes last so leaving still reports its result. Their agents leave with them. */
+  function removeMember(member: BrowserMember) {
     void act(async () => {
-      for (const device of status?.devices?.filter(d => d.memberId === member.id) || []) await api.command('remove', urlRoom, { deviceId: device.id });
-      setNotice(`${member.name} was removed from the room.`);
+      const devices = (status?.devices?.filter(d => d.memberId === member.id) || []).sort((a, b) => Number(a.id === status?.deviceId) - Number(b.id === status?.deviceId));
+      for (const device of devices) await api.command('remove', urlRoom, { deviceId: device.id });
+      setConfirming(undefined);
+      setNotice(member.id === status?.memberId ? 'You left this room.' : `${member.name} was removed from the room.`);
     });
+  }
+  const agentsOf = (member: BrowserMember) => status?.members?.filter(m => isAgent(m) && m.operatorId === member.id).length || 0;
+  /** Inline confirmation for removing a person or leaving, naming the agents that go with them. */
+  function confirmRemove(member: BrowserMember) {
+    const leaving = member.id === status?.memberId, count = agentsOf(member);
+    const agentsText = `${count} agent${count === 1 ? '' : 's'}`;
+    return <div className="browser-confirm" role="group" aria-label={leaving ? 'Confirm leaving the room' : `Confirm removing ${member.name}`}>
+      <p>{leaving ? `Leave this room on all your devices${count ? ` and remove your ${agentsText}` : ''}?` : `Remove ${member.name}${count ? ` and their ${agentsText}` : ''} from this room?`}</p>
+      <div><button className="secondary" disabled={busy} onClick={() => removeMember(member)}>{leaving ? 'Leave room' : 'Remove'}</button><button className="browser-text-link" onClick={() => setConfirming(undefined)}>Cancel</button></div>
+    </div>;
   }
 
   return <div className={`browser-rooms ${admitted ? 'browser-joined' : ''}`}>
@@ -325,13 +339,14 @@ export function BrowserRooms() {
               <section aria-label="People and agents in this room" className="browser-people"><h3>{agents.length ? 'People and agents' : 'People'} <span>{status.members!.length}</span></h3>
                 {status.members!.map(member => {
                   const devices = status.devices!.filter(d => d.memberId === member.id).length;
-                  const removable = isAgent(member) && (host || member.operatorId === status.memberId);
+                  // The host may remove anyone but themselves; an operator may remove their own agents.
+                  const removable = member.id !== status.memberId && (host ? member.id !== status.ownerId : isAgent(member) && member.operatorId === status.memberId);
                   return <div className="browser-person" key={member.id}><span className={`avatar ${isAgent(member) ? 'agent' : ''}`} aria-hidden="true">{member.name.slice(0, 1)}</span><div><strong>{member.name}{member.id === status.memberId ? ' (you)' : ''}</strong>
                     <span>{isAgent(member) ? `Agent · operated by ${operatorOf(member)}` : `${member.id === status.ownerId ? 'Host · ' : ''}${devices} device${devices === 1 ? '' : 's'}`}</span>
-                    {removable && <button className="browser-remove" disabled={busy} aria-label={`Remove ${member.name} from the room`} onClick={() => removeAgent(member)}>Remove agent</button>}</div></div>;
+                    {removable && (confirming === member.id ? confirmRemove(member) : <button className="browser-remove" disabled={busy} aria-label={`Remove ${member.name} from the room`} onClick={() => setConfirming(member.id)}>{isAgent(member) ? 'Remove agent' : 'Remove'}</button>)}</div></div>;
                 })}
               </section>
-              {!isAgent(self) && <section className="browser-agents"><h3>Your agents</h3><p>Connect an agent you run. It joins as its own participant, shown as operated by you, and replies when someone mentions it.</p>
+              {!isAgent(self) && <section className="browser-agents"><h3>Your agents</h3><p>You’re connecting as <strong>{self?.name}</strong>: you’ll be the operator of any agent you connect here, and only you and the host can remove it. Use your own browser, not one an agent is driving.</p>
                 {agentLink ? <div className="browser-agent-link"><p>Give this link to <strong>{agentLink.name}</strong>. It works once and expires in 15 minutes.</p><label className="sr-only" htmlFor="browser-agent-link">Agent link for {agentLink.name}</label><input id="browser-agent-link" readOnly value={agentLink.url} onFocus={e => e.target.select()} />
                   <div><button className="secondary" onClick={() => void copyAgentLink()}>Copy agent link</button><button className="browser-text-link" onClick={() => setAgentLink(undefined)}>Done</button></div></div>
                   : <form onSubmit={connectAgent}><label>Agent name<input value={agentName} onChange={e => setAgentName(e.target.value)} required maxLength={64} placeholder="Codex" autoComplete="off" /></label><button className="secondary" disabled={busy || !agentName.trim()}>Connect an agent</button></form>}
@@ -345,6 +360,7 @@ export function BrowserRooms() {
                 <details className="browser-device-details"><summary>Manage your devices</summary>
                   {status.devices!.filter(d => d.memberId === status.memberId).map(d => <div key={d.id}><strong>{d.label} · {d.id.slice(-6).toUpperCase()}</strong><span>{d.id === status.deviceId ? 'This device' : connected.includes(d.id) ? 'Connected' : 'Offline'}</span>{d.id !== status.deviceId && <button className="browser-remove" aria-label={`Remove ${d.label} ${d.id.slice(-6).toUpperCase()}`} disabled={busy} onClick={() => void act(async () => { await api.command('remove', urlRoom, { deviceId: d.id }); })}>Remove device</button>}</div>)}
                 </details>
+                {!host && self && (confirming === self.id ? confirmRemove(self) : <button className="browser-remove browser-leave" disabled={busy} onClick={() => setConfirming(self.id)}>Leave this room</button>)}
               </section>
               <p className="browser-storage-note">Messages stay in participating browsers. Device receipts confirm storage, not that someone has read a message.</p>
             </aside>
