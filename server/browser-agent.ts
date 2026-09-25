@@ -220,6 +220,17 @@ export function activityAnnouncer(agent: BrowserAgent, channels: () => (Channel 
   };
 }
 
+/** Harness and model given to `connect` before the host admitted the agent; the runner reports them once admitted. */
+export const PENDING_PROFILE = 'profile-pending.json';
+export async function applyPendingProfile(agent: BrowserAgent, log: (line: string) => void) {
+  const path = join(agent.dir, PENDING_PROFILE);
+  if (!existsSync(path)) return;
+  const pending = readJson<{ harness?: string; model?: string } | null>(path, null);
+  try { if (pending) { await agent.command('profile', pending); log('reported harness and model'); } }
+  catch (error) { log(`could not report harness and model (run profile again): ${(error as Error).message}`); }
+  finally { try { unlinkSync(path); } catch { /* Already gone. */ } }
+}
+
 /** Long-running peer loop: presence, signaling, data channels, storage, and outbox delivery. */
 export async function runBridge(agent: BrowserAgent, log: (line: string) => void = console.error) {
   const identity = await agent.ensureIdentity();
@@ -391,6 +402,7 @@ export async function runBridge(agent: BrowserAgent, log: (line: string) => void
       epoch = next.epoch; status = next;
       writeJson(join(agent.dir, 'members.json'), { memberId: next.memberId, members: next.members || [], devices: (next.devices || []).map(d => ({ id: d.id, memberId: d.memberId })) });
       if (next.settings) writeJson(join(agent.dir, 'settings.json'), { floor: next.settings.floor, agentAssignmentsWake: next.settings.agentAssignmentsWake });
+      await applyPendingProfile(agent, log);
       for (const signal of next.signals || []) cursor = Math.max(cursor, signal.seq);
       const available = (next.devices || []).filter(d => d.id !== identity.id && d.session);
       for (const [id, peer] of peers) {

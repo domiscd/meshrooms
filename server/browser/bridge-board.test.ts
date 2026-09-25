@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test';
 import { taskBody, type TaskPacket } from '../../src/browser/board';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BrowserAgent, boardTasks } from '../browser-agent';
+import { BrowserAgent, PENDING_PROFILE, applyPendingProfile, boardTasks } from '../browser-agent';
 
 const roomId = crypto.randomUUID(), alex = crypto.randomUUID(), codex = crypto.randomUUID();
 const packet = (body: ReturnType<typeof taskBody>): TaskPacket => ({ body, signature: '' });
@@ -36,3 +36,23 @@ test("Copilot's review: the bridge's board cursor keeps growing after compaction
     expect(boardTasks(agent.taskOps())[0]).toMatchObject({ assigneeId: codex, assignedRevision: 1180 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("Copilot's review of #12: harness and model given before admission are reported once admitted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bridge-profile-'));
+  try {
+    const agent = new BrowserAgent(dir, 'https://example.test', roomId) as any, sent: unknown[] = [], logs: string[] = [];
+    agent.command = async (action: string, payload: unknown) => { sent.push([action, payload]); return {}; };
+    await applyPendingProfile(agent, line => logs.push(line)); // Nothing pending: nothing sent.
+    writeFileSync(join(agent.dir, PENDING_PROFILE), JSON.stringify({ harness: 'Claude Code', model: 'claude-opus-5-5' }));
+    await applyPendingProfile(agent, line => logs.push(line));
+    expect(sent).toEqual([['profile', { harness: 'Claude Code', model: 'claude-opus-5-5' }]]);
+    expect(existsSync(join(agent.dir, PENDING_PROFILE))).toBe(false);
+    // A rejected value is logged and not retried forever; the agent can run profile again.
+    writeFileSync(join(agent.dir, PENDING_PROFILE), JSON.stringify({ model: '<bad>' }));
+    agent.command = async () => { throw new Error('Give a model of up to 48 letters'); };
+    await applyPendingProfile(agent, line => logs.push(line));
+    expect(logs.at(-1)).toContain('run profile again');
+    expect(existsSync(join(agent.dir, PENDING_PROFILE))).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+

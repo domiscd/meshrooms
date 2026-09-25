@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
-import { BrowserAgent, attachmentBrowser, listenBrowser, parseConnectLink, runBridge, sendBrowser, taskBrowser } from './browser-agent';
+import { BrowserAgent, PENDING_PROFILE, attachmentBrowser, listenBrowser, parseConnectLink, runBridge, sendBrowser, taskBrowser } from './browser-agent';
 
 export { parseConnectLink };
 import { TASK_STATUSES, type TaskStatus } from '../src/collab';
@@ -98,10 +98,13 @@ export async function agentCli(argv: string[]): Promise<unknown> {
     }
     // Everyone sees which harness and model an agent runs on; the agent reports it, the room cannot verify it.
     const runtime = { ...(values['--harness'] ? { harness: values['--harness'] } : {}), ...(values['--model'] ? { model: values['--model'] } : {}) };
-    if (status.memberId && Object.keys(runtime).length) await agent.command('profile' as never, runtime);
+    // Waiting for the host: the runner reports these once the agent is admitted, so they are not lost.
+    let runtimeState: 'reported' | 'after-admission' | undefined;
+    if (Object.keys(runtime).length && status.memberId) { await agent.command('profile' as never, runtime); runtimeState = 'reported'; }
+    else if (Object.keys(runtime).length) { writeFileSync(join(agent.dir, PENDING_PROFILE), JSON.stringify(runtime), { mode: 0o600 }); runtimeState = 'after-admission'; }
     const pid = runnerAlive(roomId) ?? startRunner(roomId);
     const me = (status.members || []).find((m: any) => m.id === status.memberId);
-    return { state: status.memberId ? 'connected' : 'waiting-for-host', roomId, title: status.title, agentName: me?.name, deviceId: identity.id, runnerPid: pid, ...runtime,
+    return { state: status.memberId ? 'connected' : 'waiting-for-host', roomId, title: status.title, agentName: me?.name, deviceId: identity.id, runnerPid: pid, ...runtime, ...(runtimeState ? { runtimeState } : {}),
       next: [
         ...(Object.keys(runtime).length ? [] : [`Say what you run on: bun ${process.argv[1]} profile --room ${roomId} --harness '<your harness>' --model '<your model id>'`]),
         `Wait for your turn: bun ${process.argv[1]} listen --room ${roomId} --wait-seconds 60 (repeat with --after <cursor>)`,
