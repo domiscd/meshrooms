@@ -3,9 +3,11 @@
  * form of asking the user a question) and give advice, but only people's votes count. Like tasks, every change is a
  * signed operation between devices that the room service never sees, and every device folds them the same way.
  *
- * A decision is a chain of revisions; each operation must extend the one before it, and ties at a revision fall to the
- * lower operation id, so clocks never decide anything. Closing records the tally, so the outcome is what the closer saw
- * and never changes afterwards, even as membership does.
+ * A decision is a chain of revisions keyed by its creator and id, so nobody can take over someone else's decision by
+ * signing a competing first revision; each operation must extend the one before it, and ties at a revision fall to the
+ * lower operation id, so clocks never decide anything. Closing pins the people's votes it counted: every device checks
+ * them against the votes it holds and rejects a close whose tally doesn't add up, so a steward can end a decision but
+ * cannot invent its outcome.
  */
 export type DecisionMode = 'choice' | 'plan-review';
 export type DecisionState = 'open' | 'closed' | 'withdrawn';
@@ -18,31 +20,39 @@ export type Outcome = {
   tally: Record<string, number>;
   voters: number; people: number;
 };
+/** A person's vote a close counted, by the vote's operation id. */
+export type Counted = { vote: string; memberId: string; optionId: string };
 export type DecisionBody = {
   kind: 'decision'; roomId: string; id: string; deviceId: string; memberId: string; at: number;
-  decisionId: string; revision: number; question: string; context: string; mode: DecisionMode; options: DecisionOption[];
+  /** The member who opened it; with decisionId, the decision's identity. Only they can sign revision 1. */
+  createdBy: string; decisionId: string; revision: number; question: string; context: string; mode: DecisionMode; options: DecisionOption[];
   /** Wake every agent (true) or these agents for their advice. */
   askAgents: boolean | string[];
-  closesAt: number | null; state: DecisionState; outcome?: Outcome;
+  closesAt: number | null; state: DecisionState; outcome?: Outcome; counted?: Counted[];
 };
 export type VoteBody = {
   kind: 'vote'; roomId: string; id: string; deviceId: string; memberId: string; at: number;
-  decisionId: string; revision: number; optionId: string | null; comment: string;
+  createdBy: string; decisionId: string; revision: number; optionId: string | null; comment: string;
 };
 export type DecisionPacket = { body: DecisionBody | VoteBody; signature: string };
 /** Unsigned envelope for exchanging decisions; each operation inside is verified against its own author's device. */
 export type DecisionSync = { kind: 'decisions'; roomId: string; ops: DecisionPacket[] };
 export type RoomMembers = { ownerId?: string; members: { id: string; role?: 'human' | 'agent'; operatorId?: string }[] };
-export type Vote = { memberId: string; optionId: string | null; comment: string; at: number; counts: boolean };
+export type Vote = { op: string; memberId: string; optionId: string | null; comment: string; at: number; counts: boolean };
 export type Decision = {
-  id: string; question: string; context: string; mode: DecisionMode; options: DecisionOption[]; askAgents: boolean | string[];
+  /** `key` identifies the decision (creator and id); `id` is what people and agents quote. */
+  key: string; id: string; question: string; context: string; mode: DecisionMode; options: DecisionOption[]; askAgents: boolean | string[];
   closesAt: number | null; state: DecisionState; outcome?: Outcome; createdBy: string; createdAt: number; updatedAt: number; revision: number;
   votes: Vote[];
-  /** For open decisions: people's votes so far, and whether the result can no longer change. */
+  /** For open decisions: people's votes so far, and whether the result can no longer change (a majority is reached). */
   tally: Outcome; settled: boolean;
+  /** Closed: false while some counted votes haven't reached this device. `uncounted` people's votes arrived after the close. */
+  verified: boolean; uncounted: number;
 };
 
 export const MAX_DECISION_OPS = 4000;
+/** Operations one member may add to a room's decisions, so nobody can fill the shared cap alone. */
+export const MAX_MEMBER_DECISION_OPS = 400;
 export const MAX_OPTIONS = 8;
 export const PLAN_REVIEW_OPTIONS: Omit<DecisionOption, 'addedBy'>[] = [
   { id: 'approve', label: 'Approve' }, { id: 'changes', label: 'Request changes' }, { id: 'reject', label: 'Reject' }];
@@ -50,7 +60,7 @@ const SYNC_CHUNK_CHARS = 15_000;
 const uuid = (v: unknown) => typeof v === 'string' && /^[a-f0-9-]{36}$/.test(v);
 const optionId = (v: unknown) => typeof v === 'string' && /^[a-z0-9-]{1,36}$/.test(v);
 const text = (v: unknown, max: number, required = false) => typeof v === 'string' && v.length <= max && (!required || !!v.trim());
-const stamp = (b: any, roomId: string) => !!b && b.roomId === roomId && uuid(b.id) && uuid(b.decisionId) && uuid(b.memberId)
+const stamp = (b: any, roomId: string) => !!b && b.roomId === roomId && uuid(b.id) && uuid(b.decisionId) && uuid(b.memberId) && uuid(b.createdBy)
   && typeof b.deviceId === 'string' && /^[a-f0-9]{64}$/.test(b.deviceId) && Number.isSafeInteger(b.at) && b.at > 0
   && Number.isSafeInteger(b.revision) && b.revision >= 1 && b.revision <= 1_000_000;
 
@@ -67,7 +77,12 @@ export function validDecisionBody(b: any, roomId: string): b is DecisionBody {
     && new Set(b.options.map((o: any) => o.id)).size === b.options.length
     && (typeof b.askAgents === 'boolean' || (Array.isArray(b.askAgents) && b.askAgents.length <= 16 && b.askAgents.every(uuid)))
     && (b.closesAt === null || (Number.isSafeInteger(b.closesAt) && b.closesAt > 0)) && ['open', 'closed', 'withdrawn'].includes(b.state)
-    && (b.state === 'closed' ? validOutcome(b.outcome) : b.outcome === undefined);
+    && (b.state === 'closed' ? validOutcome(b.outcome) && validCounted(b.counted) : b.outcome === undefined && b.counted === undefined)
+    && (b.revision !== 1 || b.memberId === b.createdBy);
+}
+function validCounted(c: any) {
+  return Array.isArray(c) && c.length <= 256 && c.every((v: any) => v && uuid(v.vote) && uuid(v.memberId) && optionId(v.optionId) && Object.keys(v).length === 3)
+    && new Set(c.map((v: any) => v.memberId)).size === c.length;
 }
 export function validVoteBody(b: any, roomId: string): b is VoteBody {
   return stamp(b, roomId) && b.kind === 'vote' && (b.optionId === null || optionId(b.optionId)) && text(b.comment, 500);
@@ -81,8 +96,26 @@ function steward(room: RoomMembers, creator: string, memberId: string) {
   return room.members.some(m => m.id === creator && m.role === 'agent' && m.operatorId === memberId);
 }
 
-/** Whether `next` may follow `current`: options only grow, only stewards change the terms or close, and closing is final. */
-function extends_(current: DecisionBody, next: DecisionBody, room: RoomMembers) {
+/**
+ * Whether a close's outcome follows from the votes it pins: every pinned vote this device holds matches, no pinned voter
+ * is a known agent, and the tally, voters and result are exactly what those votes give.
+ */
+function honestClose(next: DecisionBody, held: Map<string, VoteBody>, room: RoomMembers) {
+  const counted = next.counted!, outcome = next.outcome!;
+  for (const c of counted) {
+    const vote = held.get(c.vote);
+    if (vote && (vote.memberId !== c.memberId || vote.optionId !== c.optionId || vote.decisionId !== next.decisionId || vote.createdBy !== next.createdBy)) return false;
+    if (room.members.some(m => m.id === c.memberId && m.role === 'agent')) return false;
+    if (!next.options.some(o => o.id === c.optionId)) return false;
+  }
+  const expected = tallyVotes(next.options, counted.map(c => ({ op: c.vote, memberId: c.memberId, optionId: c.optionId, comment: '', at: 0, counts: true })), outcome.people).tally;
+  return JSON.stringify(expected.tally) === JSON.stringify(outcome.tally) && expected.voters === outcome.voters && expected.result === outcome.result
+    && JSON.stringify([...expected.optionIds].sort()) === JSON.stringify([...outcome.optionIds].sort());
+}
+
+/** Whether `next` may follow `current`: options only grow, only stewards change the terms or close, and closing is final and honest. */
+function extends_(current: DecisionBody, next: DecisionBody, room: RoomMembers, held: Map<string, VoteBody>) {
+  if (next.state === 'closed' && !honestClose(next, held, room)) return false;
   if (current.state !== 'open' || next.revision !== current.revision + 1 || next.mode !== current.mode) return false;
   if (next.options.length < current.options.length || !current.options.every((o, i) => sameOption(o, next.options[i]))) return false;
   const added = next.options.slice(current.options.length);
@@ -110,31 +143,40 @@ export function tallyVotes(options: DecisionOption[], votes: Vote[], people: num
 export function foldDecisions(ops: (DecisionBody | VoteBody)[], room: RoomMembers): Decision[] {
   const people = room.members.filter(m => (m.role ?? 'human') === 'human');
   const roleOf = (id: string) => room.members.find(m => m.id === id)?.role ?? (room.members.some(m => m.id === id) ? 'human' : undefined);
-  const chains = new Map<string, DecisionBody[]>(), ballots = new Map<string, VoteBody>();
+  const chains = new Map<string, DecisionBody[]>(), ballots = new Map<string, VoteBody>(), held = new Map<string, VoteBody>();
   for (const op of ops) {
-    if (op.kind === 'decision') chains.set(op.decisionId, [...(chains.get(op.decisionId) || []), op]);
-    else { const key = `${op.decisionId}:${op.memberId}`, seen = ballots.get(key); if (!seen || order(seen, op) < 0) ballots.set(key, op); }
+    const key = `${op.createdBy}:${op.decisionId}`;
+    if (op.kind === 'decision') chains.set(key, [...(chains.get(key) || []), op]);
+    else { held.set(op.id, op); const ballot = `${key}:${op.memberId}`, seen = ballots.get(ballot); if (!seen || order(seen, op) < 0) ballots.set(ballot, op); }
   }
   const decisions: Decision[] = [];
-  for (const [id, chain] of chains) {
+  for (const [key, chain] of chains) {
     chain.sort(order);
     const first = chain[0];
-    if (first.revision !== 1 || first.state !== 'open') continue;
+    if (first.revision !== 1 || first.state !== 'open' || first.memberId !== first.createdBy) continue;
     let current = first;
-    for (const op of chain.slice(1)) if (extends_(current, op, room)) current = op;
-    const votes: Vote[] = [...ballots.values()].filter(v => v.decisionId === id && roleOf(v.memberId) !== undefined
+    for (const op of chain.slice(1)) if (extends_(current, op, room, held)) current = op;
+    const votes: Vote[] = [...ballots.values()].filter(v => `${v.createdBy}:${v.decisionId}` === key && roleOf(v.memberId) !== undefined
       && (v.optionId === null || current.options.some(o => o.id === v.optionId)))
-      .map(v => ({ memberId: v.memberId, optionId: v.optionId, comment: v.comment, at: v.at, counts: roleOf(v.memberId) === 'human' }));
+      .map(v => ({ op: v.id, memberId: v.memberId, optionId: v.optionId, comment: v.comment, at: v.at, counts: roleOf(v.memberId) === 'human' }));
     const live = tallyVotes(current.options, votes, people.length);
-    decisions.push({ id, question: current.question, context: current.context, mode: current.mode, options: current.options, askAgents: current.askAgents,
+    const pinned = new Set((current.counted || []).map(c => c.vote));
+    decisions.push({ key, id: first.decisionId, question: current.question, context: current.context, mode: current.mode, options: current.options, askAgents: current.askAgents,
       closesAt: current.closesAt, state: current.state, ...(current.outcome ? { outcome: current.outcome } : {}), createdBy: first.memberId, createdAt: first.at,
-      updatedAt: current.at, revision: current.revision, votes, tally: current.outcome ?? live.tally, settled: current.state !== 'open' || live.settled });
+      updatedAt: current.at, revision: current.revision, votes, tally: current.outcome ?? live.tally, settled: current.state !== 'open' || live.settled,
+      verified: [...pinned].every(op => held.has(op)),
+      uncounted: current.state === 'closed' ? votes.filter(v => v.counts && v.optionId !== null && !pinned.has(v.op)).length : 0 });
   }
   return decisions.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
 }
 
-/** Whether a decision should close now: the result can no longer change, or its deadline passed. */
-export function due(decision: Decision, now: number) { return decision.state === 'open' && (decision.settled || (decision.closesAt !== null && now >= decision.closesAt)); }
+/**
+ * Whether a steward's device should close a decision on its own: every person has voted, or the deadline passed. A
+ * majority reached earlier (`settled`) is shown, and a steward may close then, but people keep the chance to vote.
+ */
+export function due(decision: Decision, now: number) {
+  return decision.state === 'open' && ((decision.tally.people > 0 && decision.tally.voters >= decision.tally.people) || (decision.closesAt !== null && now >= decision.closesAt));
+}
 
 type Author = { roomId: string; deviceId: string; memberId: string };
 const stampOf = (a: Author) => ({ roomId: a.roomId, id: crypto.randomUUID(), deviceId: a.deviceId, memberId: a.memberId, at: Date.now() });
@@ -143,7 +185,7 @@ const stampOf = (a: Author) => ({ roomId: a.roomId, id: crypto.randomUUID(), dev
 export function openDecision(a: Author & { question: string; context?: string; mode?: DecisionMode; options?: string[]; askAgents?: boolean | string[]; closesAt?: number | null; decisionId?: string }): DecisionBody {
   const mode = a.mode ?? 'choice';
   const labels = mode === 'plan-review' ? PLAN_REVIEW_OPTIONS : (a.options || []).map((label, i) => ({ id: `o${i + 1}`, label: label.trim() }));
-  const body: DecisionBody = { kind: 'decision', ...stampOf(a), decisionId: a.decisionId ?? crypto.randomUUID(), revision: 1, question: a.question.trim(), context: (a.context || '').trim(),
+  const body: DecisionBody = { kind: 'decision', ...stampOf(a), createdBy: a.memberId, decisionId: a.decisionId ?? crypto.randomUUID(), revision: 1, question: a.question.trim(), context: (a.context || '').trim(),
     mode, options: labels.map(o => ({ ...o, addedBy: a.memberId })), askAgents: a.askAgents ?? false, closesAt: a.closesAt ?? null, state: 'open' };
   if (!validDecisionBody(body, a.roomId)) throw new Error('Ask a question of up to 200 characters with 2 to 8 distinct options of up to 120 characters.');
   return body;
@@ -152,8 +194,11 @@ export function openDecision(a: Author & { question: string; context?: string; m
 export function reviseDecision(a: Author, current: Decision, change: { addOption?: string; close?: boolean; withdraw?: boolean }): DecisionBody {
   const options = change.addOption ? [...current.options, { id: crypto.randomUUID().slice(0, 8), label: change.addOption.trim(), addedBy: a.memberId }] : current.options;
   const state: DecisionState = change.withdraw ? 'withdrawn' : change.close ? 'closed' : 'open';
-  const body: DecisionBody = { kind: 'decision', ...stampOf(a), decisionId: current.id, revision: current.revision + 1, question: current.question, context: current.context,
-    mode: current.mode, options, askAgents: current.askAgents, closesAt: current.closesAt, state, ...(state === 'closed' ? { outcome: current.tally } : {}) };
+  // A close pins the people's votes it counted, so every device can check the outcome adds up.
+  const counted: Counted[] = current.votes.filter(v => v.counts && v.optionId !== null).map(v => ({ vote: v.op, memberId: v.memberId, optionId: v.optionId! }));
+  const body: DecisionBody = { kind: 'decision', ...stampOf(a), createdBy: current.createdBy, decisionId: current.id, revision: current.revision + 1, question: current.question,
+    context: current.context, mode: current.mode, options, askAgents: current.askAgents, closesAt: current.closesAt, state,
+    ...(state === 'closed' ? { outcome: current.tally, counted } : {}) };
   if (!validDecisionBody(body, a.roomId)) throw new Error('Options have up to 120 characters, and a decision has at most 8.');
   return body;
 }
@@ -161,13 +206,28 @@ export function reviseDecision(a: Author, current: Decision, change: { addOption
 export function castVote(a: Author, decision: Decision, optionId: string | null, comment = '', revision = 1): VoteBody {
   if (decision.state !== 'open') throw new Error('This decision is closed.');
   if (optionId !== null && !decision.options.some(o => o.id === optionId)) throw new Error('That option is not part of this decision.');
-  const body: VoteBody = { kind: 'vote', ...stampOf(a), decisionId: decision.id, revision, optionId, comment: comment.trim() };
+  const body: VoteBody = { kind: 'vote', ...stampOf(a), createdBy: decision.createdBy, decisionId: decision.id, revision, optionId, comment: comment.trim() };
   if (!validVoteBody(body, a.roomId)) throw new Error('Keep the reason to 500 characters.');
   return body;
 }
 /** The next vote revision for a member, so a changed vote always replaces the earlier one. */
-export const nextVoteRevision = (ops: (DecisionBody | VoteBody)[], decisionId: string, memberId: string) =>
-  1 + Math.max(0, ...ops.filter(o => o.kind === 'vote' && o.decisionId === decisionId && o.memberId === memberId).map(o => o.revision));
+export const nextVoteRevision = (ops: (DecisionBody | VoteBody)[], decision: Pick<Decision, 'id' | 'createdBy'>, memberId: string) =>
+  1 + Math.max(0, ...ops.filter(o => o.kind === 'vote' && o.decisionId === decision.id && o.createdBy === decision.createdBy && o.memberId === memberId).map(o => o.revision));
+
+/**
+ * Which incoming operations a device keeps: votes only for decisions it holds (or that arrive alongside them), and at
+ * most MAX_MEMBER_DECISION_OPS per member, so one member can't fill the room's shared cap.
+ */
+export function admissible(held: (DecisionBody | VoteBody)[], incoming: (DecisionBody | VoteBody)[]) {
+  const known = new Set(held.filter(o => o.kind === 'decision').map(o => `${o.createdBy}:${o.decisionId}`));
+  for (const o of incoming) if (o.kind === 'decision') known.add(`${o.createdBy}:${o.decisionId}`);
+  const per = new Map<string, number>(); for (const o of held) per.set(o.memberId, (per.get(o.memberId) ?? 0) + 1);
+  return incoming.filter(o => {
+    if (o.kind === 'vote' && !known.has(`${o.createdBy}:${o.decisionId}`)) return false;
+    const n = per.get(o.memberId) ?? 0; if (n >= MAX_MEMBER_DECISION_OPS) return false;
+    per.set(o.memberId, n + 1); return true;
+  });
+}
 
 /** Split decisions into sync envelopes under the data channel limit. */
 export function decisionChunks(roomId: string, ops: DecisionPacket[]): DecisionSync[] {
@@ -187,8 +247,9 @@ export function decisionChunks(roomId: string, ops: DecisionPacket[]): DecisionS
  */
 export function decisionWakes(ops: (DecisionBody | VoteBody)[], room: RoomMembers, agentId: string, after: number) {
   const decisions = foldDecisions(ops, room), fresh = ops.slice(after);
+  const mine = (o: DecisionBody | VoteBody, d: Decision) => o.kind === 'decision' && o.decisionId === d.id && o.createdBy === d.createdBy;
   const asked = decisions.filter(d => d.state === 'open' && d.createdBy !== agentId && (d.askAgents === true || (Array.isArray(d.askAgents) && d.askAgents.includes(agentId)))
-    && !d.votes.some(v => v.memberId === agentId) && fresh.some(o => o.kind === 'decision' && o.decisionId === d.id));
-  const resolved = decisions.filter(d => d.state !== 'open' && d.createdBy === agentId && fresh.some(o => o.kind === 'decision' && o.decisionId === d.id && o.state !== 'open'));
+    && !d.votes.some(v => v.memberId === agentId) && fresh.some(o => mine(o, d)));
+  const resolved = decisions.filter(d => d.state !== 'open' && d.createdBy === agentId && fresh.some(o => mine(o, d) && (o as DecisionBody).state !== 'open'));
   return { asked, resolved };
 }

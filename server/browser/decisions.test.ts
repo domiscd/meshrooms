@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { castVote, decisionChunks, decisionWakes, due, foldDecisions, nextVoteRevision, openDecision, reviseDecision, tallyVotes, validDecisionBody, validVoteBody,
+import { admissible, castVote, decisionChunks, decisionWakes, due, foldDecisions, nextVoteRevision, openDecision, reviseDecision, tallyVotes, validDecisionBody, validVoteBody,
   type DecisionBody, type RoomMembers, type VoteBody } from '../../src/browser/decisions';
 
 const roomId = crypto.randomUUID(), deviceId = 'a'.repeat(64);
@@ -25,7 +25,7 @@ test('a majority settles early, a split room is a draw, and the latest vote per 
   const ops: (DecisionBody | VoteBody)[] = [open, castVote(as(igor), d, 'o1'), castVote(as(dom), d, 'o1')];
   expect(fold(ops)[0]).toMatchObject({ settled: true, tally: { result: 'decided', optionIds: ['o1'] } }); // 2 of 3 people: sam can't change it
   const split = [open, castVote(as(igor), d, 'o1'), castVote(as(dom), d, 'o2'), castVote(as(sam), d, 'o1')];
-  const changed = [...split, castVote(as(sam), d, 'o2', '', nextVoteRevision(split.map(o => o), d.id, sam))];
+  const changed = [...split, castVote(as(sam), d, 'o2', '', nextVoteRevision(split.map(o => o), d, sam))];
   expect(fold(changed)[0].tally).toMatchObject({ result: 'decided', optionIds: ['o2'], tally: { o1: 1, o2: 2 } });
   const withdrawn = [...split, castVote(as(sam), d, null, '', 2)];
   expect(fold(withdrawn)[0]).toMatchObject({ settled: false, tally: { result: 'draw', optionIds: ['o1', 'o2'] } });
@@ -88,4 +88,51 @@ test('validation rejects malformed operations, and sync chunks stay small', () =
   expect(chunks.length).toBeGreaterThan(1);
   expect(chunks.every(c => JSON.stringify(c).length < 20_000)).toBe(true);
   expect(chunks.flatMap(c => c.ops).length).toBe(60);
+});
+
+test('a competing first revision with the same id is a separate decision, never a takeover', () => {
+  const victim = openDecision({ ...as(vesper), question: 'Real question', options: ['A', 'B'] });
+  const forged = { ...openDecision({ ...as(dom), question: 'Hijacked', options: ['X', 'Y'], decisionId: victim.decisionId }), id: '00000000-0000-4000-8000-000000000000' };
+  const decisions = fold([victim, forged]);
+  const real = decisions.find(d => d.createdBy === vesper)!;
+  expect(real).toMatchObject({ question: 'Real question', createdBy: vesper });
+  expect(decisions.find(d => d.createdBy === dom)!.key).not.toBe(real.key);
+  // Signing revision 1 in someone else's name is invalid, and a revision can't move a decision to another creator.
+  expect(validDecisionBody({ ...victim, memberId: dom }, roomId)).toBe(false);
+  const moved = { ...reviseDecision(as(dom), real, { addOption: 'C' }), createdBy: dom };
+  expect(fold([victim, moved]).find(d => d.createdBy === vesper)!.options.length).toBe(2);
+});
+
+test('a close must add up: forged tallies and agents counted as people are rejected; late and missing votes are visible', () => {
+  const open = openDecision({ ...as(vesper), question: 'Go?', options: ['Yes', 'No'] });
+  let d = fold([open])[0];
+  const igorVote = castVote(as(igor), d, 'o2'), geminiAdvice = castVote(as(gemini), d, 'o1');
+  const ops: (DecisionBody | VoteBody)[] = [open, igorVote, geminiAdvice];
+  d = fold(ops)[0];
+  const honest = reviseDecision(as(vesper), d, { close: true });
+  expect(honest.counted).toEqual([{ vote: igorVote.id, memberId: igor, optionId: 'o2' }]);
+  expect(fold([...ops, honest])[0]).toMatchObject({ state: 'closed', verified: true, uncounted: 0, outcome: { result: 'decided', optionIds: ['o2'] } });
+  const forgedTally = { ...honest, outcome: { ...honest.outcome!, optionIds: ['o1'], tally: { o1: 1, o2: 0 } }, counted: [{ vote: igorVote.id, memberId: igor, optionId: 'o1' }] };
+  expect(fold([...ops, forgedTally])[0].state).toBe('open'); // the pinned vote says o1, but Igor's vote here is o2
+  const agentCounted = { ...honest, outcome: { ...honest.outcome!, result: 'draw' as const, optionIds: ['o1', 'o2'], tally: { o1: 1, o2: 1 }, voters: 2 },
+    counted: [...honest.counted!, { vote: geminiAdvice.id, memberId: gemini, optionId: 'o1' }] };
+  expect(fold([...ops, agentCounted])[0].state).toBe('open');
+  // A pinned vote this device hasn't received yet: still closed, marked unverified. A vote after the close is uncounted.
+  expect(fold([open, geminiAdvice, honest])[0]).toMatchObject({ state: 'closed', verified: false });
+  const late = castVote(as(dom), d, 'o1');
+  expect(fold([...ops, honest, late])[0]).toMatchObject({ uncounted: 1, outcome: { optionIds: ['o2'] } });
+});
+
+test('votes need a decision this device holds; each member has a share of the cap; auto-close waits for everyone', () => {
+  const open = openDecision({ ...as(igor), question: 'Q', options: ['A', 'B'] });
+  const d = fold([open])[0];
+  const stray = { ...castVote(as(dom), d, 'o1'), decisionId: crypto.randomUUID() };
+  expect(admissible([open], [stray, castVote(as(dom), d, 'o1')]).map(o => o.decisionId)).toEqual([open.decisionId]);
+  expect(admissible([], [open, castVote(as(dom), d, 'o2')]).length).toBe(2); // decision and vote in one sync batch
+  const flood = Array.from({ length: 450 }, (_, i) => castVote(as(dom), d, 'o1', '', i + 1));
+  expect(admissible([open], flood).length).toBe(400);
+  const two = fold([open, castVote(as(igor), d, 'o1'), castVote(as(dom), d, 'o1')])[0];
+  expect(two).toMatchObject({ settled: true }); // majority reached: shown, and a steward may close
+  expect(due(two, Date.now())).toBe(false); // but it doesn't close on its own until Sam votes or the deadline passes
+  expect(due(fold([open, castVote(as(igor), d, 'o1'), castVote(as(dom), d, 'o1'), castVote(as(sam), d, 'o2')])[0], Date.now())).toBe(true);
 });
