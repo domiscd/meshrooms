@@ -4,6 +4,7 @@ import { LocalNode, NodeError, type Principal } from './node';
 import { NodeAccess } from './access';
 import type { StartupManager } from './startup';
 import type { PeerBridge } from './peer-bridge';
+import { MAX_ATTACHMENT_BYTES } from './attachments';
 
 type HttpOptions = { node: LocalNode; origins: string[]; distDir: string; dataDir: string; access: NodeAccess;
   startup: StartupManager; runtime: { apiVersion: number; instanceId: string; pid: number }; proof: (challenge: string) => string;
@@ -86,6 +87,32 @@ export function createHandler({ node, origins, distDir, dataDir, access, startup
       return value;
     } catch { throw new NodeError(400, 'A JSON command object is required.'); }
   }
+  async function bytes(request: Request): Promise<Uint8Array> {
+    const declared = Number(request.headers.get('content-length') || 0);
+    if (declared > MAX_ATTACHMENT_BYTES) throw new NodeError(413, `Attach files up to ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB.`);
+    if (!request.body) throw new NodeError(400, 'The file is empty.');
+    const reader = request.body.getReader(); const chunks: Uint8Array[] = []; let length = 0;
+    try {
+      while (true) {
+        const result = await reader.read(); if (result.done) break;
+        length += result.value.byteLength;
+        if (length > MAX_ATTACHMENT_BYTES) { await reader.cancel(); throw new NodeError(413, `Attach files up to ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB.`); }
+        chunks.push(result.value);
+      }
+    } finally { reader.releaseLock(); }
+    return new Uint8Array(Buffer.concat(chunks));
+  }
+  /** Only sniffed raster images render inline; everything else downloads, sandboxed, under a generic type. */
+  function download(attachment: { name: string; type: string; kind: string }, data: Uint8Array, method: string) {
+    const inline = attachment.kind === 'image';
+    const ascii = attachment.name.replace(/[^\x20-\x7e]|["\\]/g, '_');
+    return new Response(method === 'HEAD' ? null : new Blob([data.slice()]), { headers: {
+      'Content-Type': inline ? attachment.type : 'application/octet-stream', 'Content-Length': String(data.byteLength),
+      'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(attachment.name)}`,
+      'Cache-Control': 'private, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
+      'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox", 'Cross-Origin-Resource-Policy': 'same-origin',
+    } });
+  }
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url);
@@ -113,6 +140,14 @@ export function createHandler({ node, origins, distDir, dataDir, access, startup
           throw new NodeError(405, 'Unsupported transport command.');
         }
         if (request.method === 'GET' && url.pathname === '/api/node/snapshot') { node.touch(principal); return json(node.snapshot(principal)); }
+        const file = /^\/api\/node\/attachments\/([0-9a-f-]{36})\/([0-9a-f-]{36})$/i.exec(url.pathname);
+        if (file && (request.method === 'GET' || request.method === 'HEAD')) {
+          const { attachment, bytes: data } = node.attachment(file[1], file[2], principal); return download(attachment, data, request.method);
+        }
+        if (request.method === 'POST' && url.pathname === '/api/node/attachments') {
+          const data = await bytes(request);
+          return json(node.upload({ roomId: url.searchParams.get('roomId'), requestId: url.searchParams.get('requestId'), name: url.searchParams.get('name') ?? undefined, bytes: data }, principal), 201);
+        }
         if (request.method === 'GET' && url.pathname === '/api/node/events') return events(request, principal);
         if (request.method === 'GET' && url.pathname === '/api/node/setup') {
           node.requireOwner(principal);
@@ -121,7 +156,8 @@ export function createHandler({ node, origins, distDir, dataDir, access, startup
             startup: { preference: settings.startAtLogin ? 'login' : 'manual', ...startup.status() }, pending: node.pending(url.searchParams.get('intent') || undefined) });
         }
         if (request.method === 'POST') {
-          if (!['/api/node/rooms', '/api/node/rooms/join', '/api/node/messages', '/api/node/setup', '/api/node/control/prepare', '/api/node/control/browser'].includes(url.pathname)) throw new NodeError(404, 'Unknown local command.');
+          if (!['/api/node/rooms', '/api/node/rooms/join', '/api/node/rooms/floor', '/api/node/messages', '/api/node/tasks', '/api/node/tasks/update', '/api/node/tasks/remove',
+            '/api/node/setup', '/api/node/control/prepare', '/api/node/control/browser'].includes(url.pathname)) throw new NodeError(404, 'Unknown local command.');
           const body = await input(request);
           if (url.pathname === '/api/node/control/prepare') { node.requireOwner(principal); return json(node.prepareRoom(body), 201); }
           if (url.pathname === '/api/node/control/browser') { node.requireOwner(principal); return json({ ticket: access.issueBrowserTicket() }); }
@@ -136,6 +172,10 @@ export function createHandler({ node, origins, distDir, dataDir, access, startup
           }
           if (url.pathname === '/api/node/rooms') return json(node.createRoom(body, principal), 201);
           if (url.pathname === '/api/node/rooms/join') return json(node.joinRoom(body, principal));
+          if (url.pathname === '/api/node/rooms/floor') return json(node.setFloor(body, principal));
+          if (url.pathname === '/api/node/tasks') return json(node.createTask(body, principal), 201);
+          if (url.pathname === '/api/node/tasks/update') return json(node.updateTask(body, principal));
+          if (url.pathname === '/api/node/tasks/remove') return json(node.removeTask(body, principal));
           return json(node.send(body, principal), 201);
         }
         throw new NodeError(404, 'Unknown local endpoint.');
@@ -154,7 +194,7 @@ export function createHandler({ node, origins, distDir, dataDir, access, startup
       if (relativeReal.startsWith('..') || isAbsolute(relativeReal)) throw new NodeError(404, 'Asset not found.');
       return new Response(request.method === 'HEAD' ? null : file, { headers: {
         'Content-Type': file.type, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
-        'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+        'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'",
       } });
     } catch (error) {
       if (error instanceof NodeError) return json({ message: error.message }, error.status);

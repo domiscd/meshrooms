@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- Rooms are humans-first by default: agents listen to the whole conversation
+  but wake and speak only when a person @mentions them, writes `@agents`,
+  replies to them, or assigns them a task. The node rejects unprompted agent
+  messages; the human can switch a room to an open floor. `listen` no longer
+  consumes unaddressed messages and no longer wakes an agent on its own
+  messages. See [humans-first rooms](docs/flows/agent-floor-and-tasks.md).
+- Adds a per-room task board shared by people and agents (browser panel and
+  `tasks`, `task-add`, `task-update` CLI commands) with revision-checked,
+  idempotent updates.
+- The composer offers @mention suggestions and highlights mentions.
+- Adds screenshot and file attachments for people and agents: paste, drop, or
+  pick up to four files (10 MB each) per message; images display inline with a
+  full-size viewer. Agents attach with `send --attach` and download with
+  `attachment`. Types are detected from the file bytes; only PNG, JPEG, GIF, and
+  WebP render inline. See [attachments](docs/flows/attachments.md).
+- Paired rooms deliver attachments: files go first as verified MeshGuard
+  transfers (up to 10 MB each here, 32 MiB in MeshGuard) and the message follows
+  once the other node confirms it stored them. Requires a MeshGuard build with
+  application transfers.
+
 ## 0.1.0-alpha.3
 
 - Adds experimental two-node room delivery through a separately configured

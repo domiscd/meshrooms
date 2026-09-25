@@ -1,22 +1,26 @@
-import { randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
+import { MAX_ATTACHMENT_BYTES, MAX_MESSAGE_ATTACHMENTS, cleanName } from './attachments';
 import { defaultOptions } from './daemon';
 import { fingerprint, isUuid, tokenHash } from './model';
 import { ensureRunning, probeRuntime, type RuntimeRecord } from './runtime';
 import type { NodeSnapshot } from '../src/room';
+import { evaluateWake, type WakeResult } from '../src/collab';
 
 type ClientCredential = { version: 1; nodeId: string; dataDir: string; intentId: string; token: string; title: string; project: string; agentName: string };
 function parse(args: string[]) {
-  const command = args[0] || 'help'; const values: Record<string, string> = {};
+  const command = args[0] || 'help'; const values: Record<string, string> = {}; const attach: string[] = [];
   for (let i = 1; i < args.length; i++) {
     const key = args[i]; const value = args[++i];
+    if (key === '--attach' && value !== undefined) { attach.push(value); continue; }
     if (!key.startsWith('--') || value === undefined || Object.hasOwn(values, key)) throw new Error(`Use one value for ${key}.`);
     values[key] = value;
   }
-  const allowed = ['--data-dir', '--library', '--port', '--dev-origin', '--title', '--project', '--agent', '--request-id', '--credential', '--text', '--after', '--wait-seconds', '--room', '--descriptor'];
+  const allowed = ['--data-dir', '--library', '--port', '--dev-origin', '--title', '--project', '--agent', '--request-id', '--credential', '--text', '--after', '--wait-seconds', '--room', '--descriptor',
+    '--reply-to', '--board-after', '--task', '--revision', '--status', '--notes', '--assignee', '--id', '--out'];
   for (const key of Object.keys(values)) if (!allowed.includes(key)) throw new Error(`Unknown option ${key}.`);
-  return { command, values };
+  return { command, values, attach };
 }
 function requireText(value: string | undefined, name: string, max: number) {
   if (!value?.trim() || value.length > max) throw new Error(`${name} must contain 1–${max} characters.`); return value.trim();
@@ -45,15 +49,54 @@ async function api(record: RuntimeRecord, token: string, path: string, body?: un
   if (!response.ok) throw new Error(result?.message || `Local request failed (${response.status}).`);
   return result;
 }
+/** A stable per-file request ID, so retrying the same send re-uses the same uploads. */
+function derivedRequestId(requestId: string, index: number) {
+  const hex = createHash('sha256').update(`${requestId}:attachment:${index}`).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${'89ab'[parseInt(hex[16], 16) % 4]}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+async function upload(record: RuntimeRecord, credential: ClientCredential, file: string, requestId: string) {
+  const path = resolve(file); const info = statSync(path);
+  if (!info.isFile()) throw new Error(`${file} is not a file.`);
+  if (info.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file} exceeds the ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB attachment limit.`);
+  const query = new URLSearchParams({ roomId: credential.intentId, requestId, name: basename(path) });
+  const response = await fetch(new URL(`/api/node/attachments?${query}`, record.url), { method: 'POST', body: readFileSync(path),
+    headers: { Authorization: `Bearer ${credential.token}`, 'Content-Type': 'application/octet-stream' }, redirect: 'error', signal: AbortSignal.timeout(60000) });
+  const result = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(result?.message || `Upload failed (${response.status}).`);
+  return result as { id: string };
+}
+async function download(record: RuntimeRecord, credential: ClientCredential, id: string, out: string | undefined) {
+  const response = await fetch(new URL(`/api/node/attachments/${credential.intentId}/${id}`, record.url), {
+    headers: { Authorization: `Bearer ${credential.token}` }, redirect: 'error', signal: AbortSignal.timeout(60000) });
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.message || `Download failed (${response.status}).`);
+  const disposition = response.headers.get('content-disposition') || '';
+  const encoded = /filename\*=UTF-8''([^;]+)/.exec(disposition)?.[1];
+  const name = cleanName(encoded ? decodeURIComponent(encoded) : '', 'attachment.bin');
+  // Downloads default to a private folder under the node data directory, not the working tree.
+  const directory = resolve(out || join(credential.dataDir, 'downloads', credential.intentId)); mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, `${id.slice(0, 8)}-${name}`); const data = new Uint8Array(await response.arrayBuffer());
+  writeFileSync(path, data, { mode: 0o600 });
+  return { state: 'downloaded', id, path, name, type: response.headers.get('content-type'), size: data.byteLength };
+}
 async function ownerToken(dataDir: string, runtime: RuntimeRecord): Promise<string> {
   const confirmed = await probeRuntime(dataDir);
   if (!confirmed || confirmed.instanceId !== runtime.instanceId) throw new Error('The daemon changed during setup. Retry the same command.');
   return readFileSync(join(dataDir, 'control.key'), 'utf8').trim();
 }
-async function listen(record: RuntimeRecord, credential: ClientCredential, after: string | undefined, seconds: number) {
+function boardCursor(value: string | undefined) {
+  if (value === undefined) return undefined;
+  const cursor = Number(value); if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error('Use --board-after with the boardCursor from a previous listen.');
+  return cursor;
+}
+/**
+ * Wait until this agent is addressed. Messages nobody addressed to the agent do not end the wait and do not
+ * advance the cursor; they are returned as context with the next addressed batch.
+ */
+async function listen(record: RuntimeRecord, credential: ClientCredential, after: string | undefined, boardAfter: number | undefined, seconds: number) {
   if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60) throw new Error('Use --wait-seconds between 1 and 60.');
   const abort = new AbortController(); const timer = setTimeout(() => abort.abort(), seconds * 1000);
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let last: (WakeResult & { floor?: string; participantId: string }) | undefined;
   try {
     const response = await fetch(new URL(`/api/node/events?view=agent-${randomUUID()}`, record.url), {
       headers: { Authorization: `Bearer ${credential.token}` }, signal: abort.signal, redirect: 'error' });
@@ -68,32 +111,70 @@ async function listen(record: RuntimeRecord, credential: ClientCredential, after
         if (!event.startsWith('data: ')) continue;
         const snapshot = JSON.parse(event.slice(6)) as NodeSnapshot;
         const room = snapshot.rooms.find(r => r.id === credential.intentId); if (!room) throw new Error('The agent is no longer admitted to this room.');
-        const index = after ? room.messages.findIndex(m => m.id === after) : -1;
-        if (after && index < 0) throw new Error('The supplied cursor is not in this room. Read the room to establish a cursor.');
-        const messages = room.messages.slice(index + 1);
-        if (messages.length) return { state: 'messages', roomId: room.id, messages, cursor: messages.at(-1)!.id };
+        last = { ...evaluateWake(room, snapshot.localParticipantId, after, boardAfter), floor: room.floor, participantId: snapshot.localParticipantId };
+        if (last.state !== 'waiting') return { roomId: room.id, ...last };
       }
     }
-  } catch (error) { if (abort.signal.aborted) return { state: 'timeout', roomId: credential.intentId, messages: [], cursor: after }; throw error; }
+  } catch (error) {
+    if (!abort.signal.aborted) throw error;
+    // Observed messages stay after the unchanged cursor, so the next addressed batch still includes them.
+    return { state: 'timeout', roomId: credential.intentId, floor: last?.floor, participantId: last?.participantId, messages: [],
+      observed: last?.messages.filter(m => m.authorId !== last!.participantId).length ?? 0, cursor: after, boardCursor: last?.boardCursor ?? boardAfter };
+  }
   finally { clearTimeout(timer); abort.abort(); if (reader) await reader.cancel().catch(() => {}); }
 }
 
 export async function runCli(args: string[]): Promise<unknown> {
-  const { command, values } = parse(args);
+  const { command, values, attach } = parse(args);
   if (command === 'help') return { commands: ['status', 'ensure', 'open', 'start --title NAME --agent NAME [--project LABEL]',
-    'read --credential PATH', 'send --credential PATH --request-id UUID --text TEXT', 'listen --credential PATH [--after MESSAGE_ID] [--wait-seconds 30]',
+    'read --credential PATH', 'send --credential PATH --request-id UUID [--text TEXT] [--reply-to MESSAGE_ID] [--attach FILE]...',
+    'attachment --credential PATH --id ATTACHMENT_ID [--out DIRECTORY]',
+    'listen --credential PATH [--after MESSAGE_ID] [--board-after BOARD_CURSOR] [--wait-seconds 30]',
+    'tasks --credential PATH', 'task-add --credential PATH --request-id UUID --title TEXT [--notes TEXT] [--assignee me|PARTICIPANT_ID]',
+    'task-update --credential PATH --request-id UUID --task TASK_ID --revision N [--status todo|doing|done] [--title TEXT] [--notes TEXT] [--assignee me|none|PARTICIPANT_ID]',
     'transport', 'descriptor --room UUID', 'pair --descriptor PATH (operator-approved two-node development pairing)'],
     options: ['--data-dir PATH', '--library PATH', '--port NUMBER', '--dev-origin URL'], note: 'Browser links expire after two minutes. Agent credential files stay private on this machine.' };
-  if (!['status', 'ensure', 'open', 'start', 'read', 'send', 'listen', 'transport', 'descriptor', 'pair'].includes(command)) throw new Error(`Unknown command ${command}. Run help.`);
-  if (['read', 'send', 'listen'].includes(command)) {
+  const agentCommands = ['read', 'send', 'listen', 'tasks', 'task-add', 'task-update', 'attachment'];
+  if (attach.length && command !== 'send') throw new Error('Use --attach only with send.');
+  if (!['status', 'ensure', 'open', 'start', 'transport', 'descriptor', 'pair', ...agentCommands].includes(command)) throw new Error(`Unknown command ${command}. Run help.`);
+  if (agentCommands.includes(command)) {
     const credential = readCredential(resolve(requireText(values['--credential'], '--credential', 4096)));
     const runtime = await probeRuntime(credential.dataDir);
     if (!runtime || runtime.nodeId !== credential.nodeId) throw new Error('This agent credential has no matching running node. Ask the Meshrooms skill to reopen the existing node.');
-    if (command === 'listen') return listen(runtime, credential, values['--after'], Number(values['--wait-seconds'] || 30));
+    if (command === 'listen') return listen(runtime, credential, values['--after'], boardCursor(values['--board-after']), Number(values['--wait-seconds'] || 30));
     if (command === 'read') return api(runtime, credential.token, 'snapshot');
+    if (command === 'attachment') {
+      if (!isUuid(values['--id'])) throw new Error('Use --id with an attachment ID from a message.');
+      return download(runtime, credential, values['--id'], values['--out']);
+    }
+    if (command === 'tasks') {
+      const snapshot = await api(runtime, credential.token, 'snapshot') as NodeSnapshot; const room = snapshot.rooms.find(r => r.id === credential.intentId);
+      if (!room) throw new Error('The agent is no longer admitted to this room.');
+      return { roomId: room.id, participantId: snapshot.localParticipantId, floor: room.floor, boardCursor: room.boardRevision, tasks: room.tasks,
+        participants: room.participants.map(({ id, name, role, state }) => ({ id, name, role, state })) };
+    }
     const id = values['--request-id']; if (!isUuid(id)) throw new Error('Use --request-id with a UUID and retain it for uncertain retries.');
-    const text = requireText(values['--text'], '--text', 4000);
-    return api(runtime, credential.token, 'messages', { roomId: credential.intentId, requestId: id, text });
+    if (command === 'send') {
+      if (attach.length > MAX_MESSAGE_ATTACHMENTS) throw new Error(`Attach up to ${MAX_MESSAGE_ATTACHMENTS} files per message.`);
+      const text = attach.length && values['--text'] === undefined ? '' : requireText(values['--text'], '--text', 4000);
+      if (values['--reply-to'] !== undefined && !isUuid(values['--reply-to'])) throw new Error('Use --reply-to with a message ID from this room.');
+      const attachments: string[] = [];
+      for (const [index, file] of attach.entries()) attachments.push((await upload(runtime, credential, file, derivedRequestId(id, index))).id);
+      return api(runtime, credential.token, 'messages', { roomId: credential.intentId, requestId: id, text, replyTo: values['--reply-to'],
+        ...(attachments.length ? { attachments } : {}) });
+    }
+    const assignee = async () => {
+      const value = values['--assignee']; if (value === undefined) return undefined; if (value === 'none') return null;
+      if (value === 'me') return (await api(runtime, credential.token, 'snapshot') as NodeSnapshot).localParticipantId;
+      if (!isUuid(value)) throw new Error('Use --assignee me, none, or a participant ID from the tasks command.'); return value;
+    };
+    const notes = values['--notes'] === undefined ? undefined : values['--notes'].trim();
+    if (command === 'task-add') return api(runtime, credential.token, 'tasks', { roomId: credential.intentId, requestId: id,
+      title: requireText(values['--title'], '--title', 120), notes, assigneeId: await assignee() });
+    if (!isUuid(values['--task'])) throw new Error('Use --task with a task ID from the tasks command.');
+    const revision = Number(values['--revision']); if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('Use --revision with the task revision you last read.');
+    return api(runtime, credential.token, 'tasks/update', { roomId: credential.intentId, requestId: id, taskId: values['--task'], revision,
+      title: values['--title'] === undefined ? undefined : requireText(values['--title'], '--title', 120), notes, status: values['--status'], assigneeId: await assignee() });
   }
   const options = defaultOptions();
   if (values['--data-dir']) options.dataDir = resolve(values['--data-dir']);

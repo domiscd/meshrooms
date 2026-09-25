@@ -12,6 +12,8 @@ import { loadControlToken, registerRuntime, runtimeProof, type RuntimeRecord } f
 import { startupManager, type StartupManager } from './startup';
 import { MeshGuardTransport } from './meshguard';
 import { PeerBridge } from './peer-bridge';
+import { fileBlobs } from './blobs';
+import { MAX_ATTACHMENT_BYTES } from './attachments';
 
 export type DaemonOptions = { dataDir: string; libraryPath: string; port: number; distDir: string; devOrigin?: string; startup?: StartupManager;
   meshguard?: { socketPath: string; publicKey: string } };
@@ -49,11 +51,12 @@ export function startDaemon(options: DaemonOptions) {
   let bridge: PeerBridge | undefined;
   try {
     server = Bun.serve({
-      hostname: '127.0.0.1', port: options.port, idleTimeout: 0, maxRequestBodySize: 32768,
+      hostname: '127.0.0.1', port: options.port, idleTimeout: 0, maxRequestBodySize: MAX_ATTACHMENT_BYTES + 65536,
       fetch(request) { return handler ? handler(request) : Response.json({ message: 'The local daemon is starting.' }, { status: 503 }); },
     });
     store = openWormDBStore({ dataDir: realpathSync(options.dataDir), libraryPath: realpathSync(options.libraryPath) });
-    node = new LocalNode(store!);
+    // Attachment bytes live beside the WormDB store; room access and names stay in the catalog.
+    node = new LocalNode(store!, fileBlobs(join(realpathSync(options.dataDir), 'attachments')));
     if (options.meshguard) bridge = new PeerBridge(node, new MeshGuardTransport(options.meshguard.socketPath, options.meshguard.publicKey));
     const control = loadControlToken(options.dataDir);
     access = new NodeAccess(control, node);

@@ -41,6 +41,11 @@ original IDs and reject changed content. `meshrooms transport` reports pending
 IDs and `storedRemotely` IDs. A remote storage receipt does not mean the human or
 agent has read or acted on a message.
 
+Attachments travel separately as verified MeshGuard transfers (`XFER*`, which
+MeshGuard advertises with `"transfers":1` in `APPINFO`) before the message that
+references them; the receiving node stores each file and returns a `file-ack`.
+See [attachments](flows/attachments.md#paired-rooms).
+
 Messages are split into bounded, hashed chunks to fit the 952-byte application
 payload. Outbound chunks are paced; each room retries independently. Incomplete
 assemblies are limited to sixteen globally, four per authenticated peer across all

@@ -1,0 +1,76 @@
+# Humans-first rooms and the task board
+
+Status: implemented in the local daemon for testing. Browser rooms have no
+agents yet, so they are unaffected.
+
+## Why
+
+In the reference product we benchmarked against (Delta), agents answer every
+message the moment it arrives. People lose the room to agent chatter before
+they have finished talking to each other. Meshrooms rooms now default to
+**humans-first**: agents listen to everything but speak only when a person
+addresses them.
+
+## Floor policy
+
+Each room has a `floor`, which only the local human can change (Agents reply →
+*When mentioned* / *To every message*). Rooms created before this change read as
+`humans-first`.
+
+| | `humans-first` (default) | `open` |
+| --- | --- | --- |
+| Wakes an agent | A person's `@Name`, a person's `@agents`, a person's reply to the agent's message, or a person assigning the agent a task | Any message from a person; another agent's message only if it mentions or replies to this agent; any assignment |
+| Agent may send | A reply (`replyTo`) to a message that woke it, or anything while it holds an open task a person assigned | Anything |
+
+An agent's own messages never wake it. Another agent's message never wakes it
+in humans-first rooms, so two agents cannot keep each other talking.
+
+Enforcement lives in the node (`LocalNode.send`), not only in the skill: a
+harness that ignores its instructions still cannot post unprompted. The
+rejection is a `409` explaining the rule.
+
+Mentions are derived from message text against the room roster at read time
+(`src/collab.ts`). They are case-insensitive, match whole names (including
+names with spaces, with longer names taking precedence), and are not stored,
+so the stored message format and peer delivery fingerprints do not change.
+Renaming a participant changes which older messages highlight them.
+
+## Listening without reacting
+
+`listen` evaluates each snapshot with `evaluateWake`:
+
+- `history`: the first call without `--after`, so the agent can read what it missed.
+- `addressed`: something woke the agent. `messages` contains **everything**
+  since the cursor, including conversation nobody addressed to the agent, so it
+  answers with full context. `addressed` and `tasks` say what needs a response.
+- `timeout`: nothing addressed the agent. The cursor does **not** advance, so
+  observed messages are returned with the next addressed batch. `observed`
+  counts them.
+
+`--board-after` takes the `boardCursor` from the previous result. Without it,
+assignments do not wake the agent (compatible with older callers).
+
+## Task board
+
+Each room has one board stored beside its history (`meshrooms/v1/rooms/<id>/board`),
+created on first use. Every room participant — the human in the browser, agents
+through `tasks`, `task-add`, `task-update` — can add, assign, move, annotate, and
+remove tasks.
+
+- Statuses: `todo`, `doing`, `done`. Up to 200 tasks per room.
+- Every update names the task `revision` it was based on; a stale revision is a
+  `409`, so concurrent editors cannot silently overwrite each other.
+- Commands are idempotent per author and request ID, like messages. The newest
+  256 board receipts are retained.
+- The board revision increases on every change. An assignment records who
+  assigned it and at which board revision; that is what wakes the assignee.
+- Assignees must be participants on this machine. In paired rooms the board is
+  local to each node and is not replicated; the UI says so.
+
+## Not yet
+
+- Board replication across paired nodes, and board history/activity in the
+  transcript.
+- Persistent harness wakeup ([agent room watching](agent-room-watching.md)):
+  agents still need a running `listen` loop.
+- Per-agent floor overrides and "@here"-style presence mentions.
